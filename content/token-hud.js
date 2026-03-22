@@ -1,12 +1,12 @@
 /**
- * MemBrain — Token Counter & Compression HUD v0.5.8
+ * MemBrain — Token Counter & Compression HUD v0.5.9
  *
  * Two tabs:
  *   [Tokens]      — input/output counts, compression comparison, cost estimate
  *   [Captures]    — pipeline health, recent conversations, sync status
  *   [Intelligence] — live injection stream, § symbol growth, CI visualizer
  *
- * v0.5.8: Added Intelligence tab with live injection stream + § symbol growth
+ * v0.5.9: Added Intelligence tab with live injection stream + § symbol growth
  */
 
 (function () {

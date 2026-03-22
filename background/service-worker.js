@@ -884,3 +884,58 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 });
 
 console.debug(`[MemBrain] Service worker v${CONFIG.EXTENSION_VERSION} started`);
+
+// ==================== MAIN WORLD SCRIPT INJECTION ====================
+// Inject interceptor scripts into MAIN world to bypass page CSP
+// This is the only reliable MV3 approach for strict-CSP pages like claude.ai
+
+const INJECT_SCRIPTS = [
+  'interceptor/interceptor.js',
+  'interceptor/compression.js',
+  'interceptor/context-inject.js',
+];
+
+const INJECT_HOSTS = [
+  'claude.ai',
+  'chat.openai.com',
+  'chatgpt.com',
+  'gemini.google.com',
+  'perplexity.ai',
+];
+
+function shouldInject(url) {
+  try {
+    const host = new URL(url).hostname;
+    return INJECT_HOSTS.some(h => host === h || host.endsWith('.' + h));
+  } catch { return false; }
+}
+
+async function injectInterceptors(tabId, url) {
+  if (!shouldInject(url)) return;
+  try {
+    for (const file of INJECT_SCRIPTS) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: [file],
+        world: 'MAIN',
+      });
+    }
+    console.debug('[MemBrain] Interceptors injected into tab', tabId);
+  } catch (e) {
+    console.warn('[MemBrain] Script injection failed:', e.message);
+  }
+}
+
+// Inject on navigation
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && tab.url) {
+    injectInterceptors(tabId, tab.url);
+  }
+});
+
+// Inject into already-open tabs on SW startup
+chrome.tabs.query({}).then(tabs => {
+  tabs.forEach(tab => {
+    if (tab.id && tab.url) injectInterceptors(tab.id, tab.url);
+  });
+}).catch(() => {});
