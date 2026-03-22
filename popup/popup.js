@@ -1,5 +1,5 @@
 /**
- * MemBrain — Popup UI (v0.5.6)
+ * MemBrain — Popup UI (v0.5.7)
  * Shows conversations, live captures, and status.
  */
 

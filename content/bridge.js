@@ -27,7 +27,15 @@
       () => {
         injectScript(
           'interceptor/compression.js',
-          () => console.debug('[MemBrain] Page scripts injected (interceptor + compression)'),
+          () => {
+            console.debug('[MemBrain] Page scripts injected (interceptor + compression)');
+            // Also inject context-inject.js for Helix CI/context injection
+            injectScript(
+              'interceptor/context-inject.js',
+              () => console.debug('[MemBrain] context-inject.js loaded'),
+              () => console.warn('[MemBrain] context-inject.js failed to load'),
+            );
+          },
           () => console.warn('[MemBrain] compression.js failed to load'),
         );
       },
