@@ -10,13 +10,21 @@
 
   const PREFIX = 'memory-ext';
 
-  function injectScript(src, onload, onerror) {
-    const script = document.createElement('script');
-    script.src = chrome.runtime.getURL(src);
-    script.type = 'text/javascript';
-    script.onload = () => { script.remove(); if (onload) onload(); };
-    script.onerror = () => { script.remove(); if (onerror) onerror(); };
-    (document.head || document.documentElement).prepend(script);
+  async function injectScript(src, onload, onerror) {
+    try {
+      // Fetch script content from extension and inject inline to bypass page CSP
+      const url = chrome.runtime.getURL(src);
+      const resp = await fetch(url);
+      const code = await resp.text();
+      const script = document.createElement('script');
+      script.textContent = code;
+      (document.head || document.documentElement).prepend(script);
+      script.remove();
+      if (onload) onload();
+    } catch (e) {
+      console.error('[MemBrain] injectScript failed for', src, e.message);
+      if (onerror) onerror();
+    }
   }
 
   function injectAll() {
