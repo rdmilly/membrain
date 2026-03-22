@@ -1,3 +1,6 @@
+## v0.6.1 — 2026-03-22
+- fix: content script triggers SW injection on load, not just tab navigation
+
 # Changelog
 
 ## v0.5.6 — 2026-03-22

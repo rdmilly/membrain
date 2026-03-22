@@ -223,7 +223,8 @@
     document.body ? start() : document.addEventListener('DOMContentLoaded', start);
   }
 
-  injectAll();
+  // Tell SW to inject interceptors into this tab (MAIN world, bypasses CSP)
+  chrome.runtime.sendMessage({ action: 'inject-now' }).catch(() => {});
   setupInputRelay();
   setupOutputRelay();
   setupBubbleSanitizer();

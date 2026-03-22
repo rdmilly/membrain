@@ -370,6 +370,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       getInjectionForPage(message.data).then(sendResponse);
       return true;
 
+    case 'inject-now':
+      // Content script is ready — inject interceptors into this tab
+      chrome.tabs.query({ active: true, currentWindow: true }).then(tabs => {
+        if (tabs[0]?.id && tabs[0]?.url) injectInterceptors(tabs[0].id, tabs[0].url);
+      }).catch(() => {});
+      sendResponse({ ok: true });
+      break;
+
     case 'context-injected':
       // Store v2 inject stats (shard+RAG) to session storage for popup HUD
       (async () => {
