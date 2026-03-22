@@ -1,0 +1,77 @@
+{
+  "manifest_version": 3,
+  "name": "MemBrain",
+  "version": "0.5.6",
+  "description": "AI conversation intelligence + token usage tracking across platforms.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "alarms"
+  ],
+  "host_permissions": [
+    "*://claude.ai/*",
+    "*://chat.openai.com/*",
+    "*://chatgpt.com/*",
+    "*://gemini.google.com/*",
+    "*://www.perplexity.ai/*",
+    "*://perplexity.ai/*",
+    "*://helix.millyweb.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://claude.ai/*",
+        "*://chat.openai.com/*",
+        "*://chatgpt.com/*",
+        "*://gemini.google.com/*",
+        "*://www.perplexity.ai/*",
+        "*://perplexity.ai/*"
+      ],
+      "js": [
+        "content/bridge.js",
+        "content/hud.js",
+        "content/token-hud.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "interceptor/interceptor.js",
+        "interceptor/compression.js",
+        "interceptor/context-inject.js",
+        "lib/transformers.min.js"
+      ],
+      "matches": [
+        "*://claude.ai/*",
+        "*://chat.openai.com/*",
+        "*://chatgpt.com/*",
+        "*://gemini.google.com/*",
+        "*://www.perplexity.ai/*",
+        "*://perplexity.ai/*"
+      ]
+    }
+  ],
+  "action": {
+    "default_title": "MemBrain",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "options_page": "options/options.html"
+}

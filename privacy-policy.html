@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MemBrain — Privacy Policy</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      max-width: 680px; margin: 0 auto; padding: 40px 24px;
+      color: #222; line-height: 1.7; font-size: 15px;
+    }
+    h1 { font-size: 24px; margin-bottom: 8px; }
+    h2 { font-size: 18px; margin-top: 28px; margin-bottom: 8px; color: #333; }
+    .updated { color: #666; font-size: 13px; margin-bottom: 32px; }
+    ul { padding-left: 24px; margin: 8px 0; }
+    li { margin: 4px 0; }
+    strong { color: #111; }
+    .highlight {
+      background: #f0ebff; border-left: 3px solid #a78bfa;
+      padding: 12px 16px; border-radius: 4px; margin: 16px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>🧠 MemBrain — Privacy Policy</h1>
+  <div class="updated">Last updated: February 21, 2026</div>
+
+  <div class="highlight">
+    <strong>Summary:</strong> Your data stays on your device. We don't collect, sell, or share any personal information. The extension only communicates with services you explicitly configure.
+  </div>
+
+  <h2>What Data We Collect</h2>
+  <p>MemBrain captures conversations from AI platforms you visit (Claude, ChatGPT, Gemini, Perplexity) while the extension is active. This includes:</p>
+  <ul>
+    <li>Message text (user and assistant turns)</li>
+    <li>Conversation metadata (timestamps, platform, conversation IDs)</li>
+    <li>Extracted facts and preferences (if you configure an API key)</li>
+  </ul>
+
+  <h2>Where Data Is Stored</h2>
+  <p>All captured data is stored <strong>locally on your device</strong> using the browser's IndexedDB storage. Your data never leaves your device unless you explicitly enable one of these optional features:</p>
+  <ul>
+    <li><strong>Backend sync:</strong> If you configure a backend URL and API key, conversations are synced to your specified server.</li>
+    <li><strong>Fact extraction:</strong> If you provide an API key for Anthropic or OpenAI, conversation text is sent to that provider's API for fact extraction.</li>
+  </ul>
+
+  <h2>Third-Party Services</h2>
+  <p>The extension may communicate with these services <strong>only if you configure them</strong>:</p>
+  <ul>
+    <li><strong>Anthropic API</strong> — for fact extraction (if you provide an Anthropic API key)</li>
+    <li><strong>OpenAI API</strong> — for fact extraction (if you provide an OpenAI API key)</li>
+    <li><strong>Your backend server</strong> — for conversation sync (if you configure a backend URL)</li>
+  </ul>
+  <p>We do not send data to any other third parties. We do not use analytics, tracking, or advertising services.</p>
+
+  <h2>API Keys</h2>
+  <p>API keys you provide are stored locally in IndexedDB on your device. They are only used to authenticate with the respective service (Anthropic, OpenAI, or your backend). They are never transmitted to us or any other party.</p>
+
+  <h2>What We Don't Do</h2>
+  <ul>
+    <li>We don't collect personal information</li>
+    <li>We don't track your browsing activity</li>
+    <li>We don't sell or share any data</li>
+    <li>We don't use cookies or analytics</li>
+    <li>We don't run background processes on sites other than the configured AI platforms</li>
+  </ul>
+
+  <h2>Data Deletion</h2>
+  <p>You can delete all stored data at any time through the extension's Settings page ("Clear All Data" button). Uninstalling the extension also removes all locally stored data.</p>
+
+  <h2>Permissions Explained</h2>
+  <ul>
+    <li><strong>storage:</strong> To save conversations and settings in IndexedDB</li>
+    <li><strong>tabs:</strong> To identify which AI platform tab is active</li>
+    <li><strong>alarms:</strong> For periodic sync and extraction timers</li>
+    <li><strong>Host permissions (AI platform URLs):</strong> To inject the conversation capture script</li>
+  </ul>
+
+  <h2>Open Source</h2>
+  <p>This extension is open source. You can review the complete source code to verify these privacy practices.</p>
+
+  <h2>Contact</h2>
+  <p>For questions about this privacy policy, contact: <strong>ryan@millyweb.com</strong></p>
+</body>
+</html>

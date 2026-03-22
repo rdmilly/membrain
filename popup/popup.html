@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MemBrain</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 440px;
+      max-height: 580px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      color: #e0e0e0;
+      background: #1a1a2e;
+      overflow-y: auto;
+    }
+    .header {
+      padding: 12px 16px;
+      background: #16213e;
+      border-bottom: 1px solid #0f3460;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .header h1 { font-size: 15px; font-weight: 600; color: #a78bfa; }
+    .header .version { font-size: 10px; color: #666; margin-left: 6px; }
+    .header-actions { display: flex; gap: 6px; }
+    .stats {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+      padding: 10px 16px;
+      background: #16213e; border-bottom: 1px solid #0f3460;
+    }
+    .stat { text-align: center; }
+    .stat-value { font-size: 18px; font-weight: 700; color: #a78bfa; }
+    .stat-label { font-size: 10px; color: #888; margin-top: 2px; }
+    .stat-value.green { color: #4ade80; }
+    .stat-value.yellow { color: #facc15; }
+    .flush-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 16px; background: #0d1b2a;
+      border-bottom: 1px solid #0f3460;
+    }
+    .flush-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .flush-dot.ok { background: #4ade80; }
+    .flush-dot.error { background: #f87171; }
+    .flush-dot.pending { background: #facc15; }
+    .flush-info { flex: 1; font-size: 11px; color: #888; }
+    .flush-info strong { color: #ccc; }
+
+    /* Tabs */
+    .tabs {
+      display: flex; background: #16213e;
+      border-bottom: 1px solid #0f3460;
+    }
+    .tab {
+      flex: 1; padding: 8px 12px; text-align: center;
+      font-size: 11px; font-weight: 600; color: #666;
+      cursor: pointer; border-bottom: 2px solid transparent;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .tab.active { color: #a78bfa; border-bottom-color: #a78bfa; }
+    .tab:hover:not(.active) { color: #888; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* Interceptors */
+    .interceptors { padding: 4px 16px 8px; }
+    .interceptor-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; flex-shrink: 0; }
+
+    /* Turns */
+    .turn-list { padding: 4px 16px 16px; }
+    .turn {
+      padding: 8px 10px; margin-bottom: 6px;
+      background: #16213e; border-radius: 6px; border-left: 3px solid #0f3460;
+    }
+    .turn.assistant { border-left-color: #a78bfa; }
+    .turn.user { border-left-color: #4ade80; }
+    .turn.flushed { opacity: 0.5; }
+    .turn-header { display: flex; justify-content: space-between; margin-bottom: 4px; }
+    .turn-platform { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #a78bfa; }
+    .turn-time { font-size: 10px; color: #666; }
+    .turn-role { font-size: 10px; color: #888; margin-bottom: 4px; }
+    .turn-content {
+      font-size: 12px; color: #ccc; line-height: 1.4;
+      max-height: 60px; overflow: hidden; word-break: break-word;
+    }
+    .turn-flushed-badge { font-size: 9px; color: #4ade80; margin-left: 6px; }
+
+    /* Conversations */
+    .conv-list { padding: 4px 16px 16px; }
+    .conv {
+      padding: 10px 12px; margin-bottom: 6px;
+      background: #16213e; border-radius: 6px;
+      border-left: 3px solid #0f3460;
+      cursor: default;
+    }
+    .conv.synced { border-left-color: #4ade80; }
+    .conv.unsynced { border-left-color: #facc15; }
+    .conv-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .conv-platform {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      padding: 1px 6px; border-radius: 3px; background: #0f3460; color: #a78bfa;
+    }
+    .conv-platform.claude { background: #2d1b69; color: #c4a8ff; }
+    .conv-platform.chatgpt { background: #1b4332; color: #95d5b2; }
+    .conv-platform.gemini { background: #3b2d1b; color: #f0c674; }
+    .conv-meta { font-size: 10px; color: #666; display: flex; gap: 8px; }
+    .conv-title { font-size: 12px; color: #ddd; line-height: 1.4; margin-bottom: 4px;
+      max-height: 36px; overflow: hidden; }
+    .conv-stats { display: flex; gap: 12px; font-size: 10px; color: #888; }
+    .conv-stats span { display: flex; align-items: center; gap: 3px; }
+    .sync-badge {
+      font-size: 9px; padding: 1px 5px; border-radius: 3px;
+    }
+    .sync-badge.synced { background: #064e3b; color: #4ade80; }
+    .sync-badge.pending { background: #422006; color: #facc15; }
+
+    
+    /* Expandable cards */
+    .conv, .turn, .fact-card { cursor: pointer; transition: all 0.15s ease; }
+    .conv:hover, .turn:hover, .fact-card:hover { background: #1a2540; }
+    .conv.expanded .conv-title,
+    .turn.expanded .turn-content,
+    .fact-card.expanded .fact-content {
+      max-height: none; overflow: visible;
+    }
+    .conv.expanded, .turn.expanded, .fact-card.expanded {
+      background: #1a2540; border-left-width: 4px;
+    }
+    .expand-hint {
+      font-size: 9px; color: #555; text-align: right;
+      margin-top: 4px; transition: opacity 0.15s;
+    }
+    .expanded .expand-hint { display: none; }
+    .conv-tab-badge {
+      font-size: 9px; padding: 1px 5px; border-radius: 3px;
+      background: #1e3a5f; color: #60a5fa; margin-left: 4px;
+    }
+    .turn-full { display: none; margin-top: 6px; padding-top: 6px; border-top: 1px solid #0f3460; }
+    .turn.expanded .turn-full { display: block; }
+    .turn.expanded .turn-content { display: none; }
+    .turn-full-content {
+      font-size: 12px; color: #ccc; line-height: 1.5;
+      white-space: pre-wrap; word-break: break-word;
+      max-height: 400px; overflow-y: auto;
+    }
+    .empty { padding: 32px 16px; text-align: center; color: #666; }
+    .btn {
+      padding: 4px 10px; font-size: 11px; background: #0f3460;
+      color: #a78bfa; border: none; border-radius: 4px; cursor: pointer;
+    }
+    .btn:hover { background: #1a4a8a; }
+    .btn.flush { background: #1e3a5f; color: #4ade80; }
+    .btn.flush:hover { background: #2a5080; }
+    .btn.export { background: #1e3a5f; color: #facc15; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  
+    /* Inject HUD */
+    .inject-hud {
+      background: #0d1b2a; border: 1px solid #0f3460;
+      border-radius: 6px; padding: 10px 12px; margin: 6px 0 2px;
+    }
+    .inject-hud-title {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.5px; color: #888; margin-bottom: 8px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .inject-hud-title .inject-count {
+      font-size: 11px; color: #a78bfa; font-weight: 700;
+    }
+    .inject-layers { display: flex; gap: 8px; margin-bottom: 8px; }
+    .inject-layer {
+      flex: 1; padding: 6px 8px; border-radius: 4px;
+      background: #16213e; border: 1px solid #1e3a5f;
+    }
+    .inject-layer.active { border-color: #4ade80; }
+    .inject-layer.inactive { opacity: 0.4; }
+    .inject-layer-name {
+      font-size: 9px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.5px; margin-bottom: 2px;
+      display: flex; align-items: center; gap: 4px;
+    }
+    .inject-layer-name .dot-green { color: #4ade80; }
+    .inject-layer-name .dot-grey  { color: #555; }
+    .inject-layer-name .layer-label-shard { color: #60a5fa; }
+    .inject-layer-name .layer-label-rag   { color: #f0a070; }
+    .inject-layer-chars { font-size: 11px; color: #ccc; font-weight: 600; }
+    .inject-layer-desc  { font-size: 10px; color: #666; margin-top: 1px; }
+    .inject-query {
+      font-size: 10px; color: #666; padding-top: 6px;
+      border-top: 1px solid #0f3460; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    .inject-query strong { color: #888; }
+    .inject-never { font-size: 11px; color: #555; text-align: center; padding: 4px 0; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🧠 MemBrain <span class="version" id="version">v0.5.6</span></h1>
+    <div class="header-actions">
+      <button class="btn flush" id="flushBtn" title="Sync to backend now">↻ Sync</button>
+      <button class="btn export" id="exportBtn" title="Export all data">⤓ Export</button>
+    </div>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="stat-value" id="convCount">0</div><div class="stat-label">Conversations</div></div>
+    <div class="stat"><div class="stat-value" id="turnCount">0</div><div class="stat-label">Turns</div></div>
+    <div class="stat"><div class="stat-value yellow" id="unsyncedCount">0</div><div class="stat-label">Unsynced</div></div>
+    <div class="stat"><div class="stat-value green" id="tokenCount">0</div><div class="stat-label">Tokens</div></div>
+  </div>
+  <div class="flush-bar" id="flushBar">
+    <span class="flush-dot pending" id="flushDot"></span>
+    <span class="flush-info" id="flushInfo">Connecting...</span>
+  </div>
+  <div class="tabs">
+    <div class="tab active" data-tab="conversations">Conversations</div>
+    <div class="tab" data-tab="captures">Live Captures</div>
+    <div class="tab" data-tab="facts">Facts</div>
+    <div class="tab" data-tab="status">Status</div>
+  </div>
+
+  <!-- Conversations Tab -->
+  <div class="tab-panel active" id="tab-conversations">
+    <div class="conv-list" id="convList">
+      <div class="empty">No conversations yet. Open an AI chat to start.</div>
+    </div>
+  </div>
+
+  <!-- Live Captures Tab -->
+  <div class="tab-panel" id="tab-captures">
+    <div class="turn-list" id="turnList">
+      <div class="empty">No captures yet. Open an AI chat to start.</div>
+    </div>
+  </div>
+
+  <!-- Facts Tab -->
+  <div class="tab-panel" id="tab-facts">
+    <div style="padding: 8px 16px; display: flex; gap: 6px;">
+      <button class="btn" id="extractBtn" title="Extract facts from conversations">🔍 Extract Now</button>
+      <span id="factStats" style="font-size: 11px; color: #888; align-self: center;"></span>
+    </div>
+    <div class="conv-list" id="factList">
+      <div class="empty">No facts extracted yet. Configure API key in Status tab.</div>
+    </div>
+  </div>
+
+  <!-- Status Tab -->
+  <div class="tab-panel" id="tab-status">
+    <div style="padding: 12px 16px;">
+      <div class="section-title" style="padding: 0 0 8px;">Active Interceptors</div>
+      <div class="interceptors" id="interceptors">
+        <div style="padding:4px 0;font-size:12px;color:#666">No active interceptors</div>
+      </div>
+      <div class="section-title" style="padding: 12px 0 8px;">Platform Breakdown</div>
+      <div id="platformBreakdown" style="padding: 0 0 8px; font-size: 12px; color: #888;">Loading...</div>
+      <div class="section-title" style="padding: 12px 0 8px;">Last Sync</div>
+      <div id="lastSync" style="padding: 0 0 8px; font-size: 12px; color: #888;">Never</div>
+      <div class="section-title" style="padding: 12px 0 8px;">Backend</div>
+      <div id="backendInfo" style="padding: 0 0 8px; font-size: 12px; color: #888;">Loading...</div>
+      <div class="section-title" style="padding: 12px 0 8px;">Auto-Inject</div>
+      <div style="padding: 0 0 8px; display: flex; align-items: center; gap: 8px;">
+        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+          <input type="checkbox" id="injectorToggle" style="accent-color: #a78bfa;" />
+          <span style="font-size: 12px; color: #ccc;">Inject memories into outgoing messages</span>
+        </label>
+      </div>
+      <div id="injectorStats" style="padding: 0 0 8px; font-size: 11px; color: #888;"></div>
+      <div style="padding: 0 0 8px; display: flex; align-items: center; gap: 8px;">
+        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+          <input type="checkbox" id="contextInjectToggle" style="accent-color: #4ade80;" />
+          <span style="font-size: 12px; color: #ccc;">Inject Helix context before messages</span>
+        </label>
+      </div>
+
+      <div class="inject-hud" id="contextInjectHud">
+        <div class="inject-hud-title">
+          <span>Injection Layers</span>
+          <span class="inject-count" id="injectTotalCount"></span>
+        </div>
+        <div class="inject-layers">
+          <div class="inject-layer inactive" id="hudShardLayer">
+            <div class="inject-layer-name">
+              <span class="dot-grey" id="hudShardDot">●</span>
+              <span class="layer-label-shard">SHARD</span>
+            </div>
+            <div class="inject-layer-chars" id="hudShardChars">—</div>
+            <div class="inject-layer-desc">Session context</div>
+          </div>
+          <div class="inject-layer inactive" id="hudRagLayer">
+            <div class="inject-layer-name">
+              <span class="dot-grey" id="hudRagDot">●</span>
+              <span class="layer-label-rag">RAG</span>
+            </div>
+            <div class="inject-layer-chars" id="hudRagChars">—</div>
+            <div class="inject-layer-desc">Query match</div>
+          </div>
+        </div>
+        <div class="inject-query" id="hudLastQuery"><span class="inject-never">No injections yet this session</span></div>
+      </div>
+      <div class="section-title" style="padding: 12px 0 8px;">API Key (for Fact Extraction)</div>
+      <div style="padding: 0 0 8px;">
+        <select id="apiProvider" style="background: #0f3460; color: #ccc; border: 1px solid #1e3a5f; border-radius: 4px; padding: 4px 8px; font-size: 12px; margin-bottom: 6px; width: 100%;">
+          <option value="anthropic">Anthropic (Haiku)</option>
+          <option value="openai">OpenAI (GPT-4o-mini)</option>
+        </select>
+        <input type="password" id="apiKeyInput" placeholder="API key..." style="width: 100%; background: #0f3460; color: #ccc; border: 1px solid #1e3a5f; border-radius: 4px; padding: 6px 8px; font-size: 12px; margin-bottom: 6px;" />
+        <button class="btn" id="saveApiBtn">Save API Key</button>
+        <span id="apiStatus" style="font-size: 11px; color: #888; margin-left: 8px;"></span>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

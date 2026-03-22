@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MemBrain — Settings</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px; color: #e0e0e0; background: #0d1117;
+      max-width: 660px; margin: 0 auto; padding: 32px 24px 48px;
+    }
+    h1 { font-size: 22px; color: #a78bfa; margin-bottom: 4px; }
+    .subtitle { font-size: 12px; color: #666; margin-bottom: 28px; }
+
+    .section {
+      background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+      padding: 20px; margin-bottom: 16px;
+    }
+    .section h2 {
+      font-size: 13px; font-weight: 700; color: #8b949e; text-transform: uppercase;
+      letter-spacing: 0.08em; margin-bottom: 16px;
+      padding-bottom: 8px; border-bottom: 1px solid #21262d;
+    }
+    .section h2 .badge {
+      display: inline-block; margin-left: 8px; padding: 1px 7px;
+      border-radius: 10px; font-size: 10px; font-weight: 700;
+      text-transform: none; letter-spacing: 0;
+      background: #1a2433; color: #58a6ff; border: 1px solid #1f3a5f;
+      vertical-align: middle;
+    }
+    .section h2 .badge.free { background: #1a2a1a; color: #4ade80; border-color: #1e4a1e; }
+    .section h2 .badge.paid { background: #2a1a3a; color: #a78bfa; border-color: #4a2a7a; }
+
+    .field { margin-bottom: 14px; }
+    .field:last-child { margin-bottom: 0; }
+    label { display: block; font-size: 11px; color: #8b949e; margin-bottom: 5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+    input[type="text"], input[type="password"], select, input[type="number"] {
+      width: 100%; padding: 8px 12px; font-size: 13px;
+      background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+      border-radius: 6px; outline: none;
+    }
+    input:focus, select:focus { border-color: #a78bfa; }
+
+    .checkbox-row {
+      display: flex; align-items: center; gap: 10px; padding: 5px 0;
+    }
+    .checkbox-row input { accent-color: #a78bfa; width: 14px; height: 14px; flex-shrink: 0; }
+    .checkbox-row span { font-size: 13px; color: #c9d1d9; line-height: 1.4; }
+
+    .hint { font-size: 11px; color: #6e7681; margin-top: 5px; line-height: 1.5; }
+
+    .btn {
+      padding: 8px 16px; font-size: 13px; font-weight: 600;
+      border: none; border-radius: 6px; cursor: pointer; transition: background 0.15s;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: #a78bfa; color: #0d1117; }
+    .btn-primary:hover:not(:disabled) { background: #c4a8ff; }
+    .btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+    .btn-secondary:hover:not(:disabled) { background: #30363d; }
+    .btn-upgrade { background: linear-gradient(135deg, #6b21a8, #a78bfa); color: #fff; }
+    .btn-upgrade:hover:not(:disabled) { background: linear-gradient(135deg, #7c3aed, #c4a8ff); }
+    .btn-danger { background: #3d0a0a; color: #f87171; border: 1px solid #7f1d1d; }
+    .btn-danger:hover:not(:disabled) { background: #7f1d1d; }
+    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+
+    .status {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 2px 9px; border-radius: 4px; font-size: 11px; font-weight: 700;
+    }
+    .status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+    .status.ok { background: #0d3320; color: #4ade80; }
+    .status.ok::before { background: #4ade80; }
+    .status.warn { background: #3b2503; color: #facc15; }
+    .status.warn::before { background: #facc15; }
+    .status.err { background: #3d0a0a; color: #f87171; }
+    .status.err::before { background: #f87171; }
+    .status.info { background: #0d1f2d; color: #58a6ff; }
+    .status.info::before { background: #58a6ff; }
+
+    /* Stats grid */
+    .stats-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+      margin-bottom: 14px;
+    }
+    .stat-card {
+      background: #0d1117; border: 1px solid #21262d;
+      border-radius: 6px; padding: 10px 8px; text-align: center;
+    }
+    .stat-card .value { font-size: 22px; font-weight: 700; color: #a78bfa; line-height: 1; }
+    .stat-card .label { font-size: 10px; color: #6e7681; margin-top: 3px; }
+
+    /* Status row */
+    .status-row {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      font-size: 12px; color: #6e7681; align-items: center;
+    }
+    .status-row span { display: flex; align-items: center; gap: 5px; }
+
+    /* Vector / Tier section */
+    .tier-card {
+      border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px;
+      display: flex; gap: 14px; align-items: flex-start;
+    }
+    .tier-card.active { border-color: #a78bfa; background: #1a0f2e; }
+    .tier-card .tier-icon { font-size: 24px; line-height: 1; }
+    .tier-card .tier-body { flex: 1; }
+    .tier-card .tier-name { font-size: 14px; font-weight: 700; color: #c9d1d9; margin-bottom: 3px; }
+    .tier-card .tier-desc { font-size: 12px; color: #8b949e; line-height: 1.5; }
+    .tier-card .tier-status { font-size: 11px; margin-top: 6px; }
+
+    .vector-stats-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px;
+    }
+    .vector-stat {
+      background: #0d1117; border: 1px solid #21262d;
+      border-radius: 6px; padding: 10px; text-align: center;
+    }
+    .vector-stat .value { font-size: 18px; font-weight: 700; color: #58a6ff; }
+    .vector-stat .label { font-size: 10px; color: #6e7681; margin-top: 2px; }
+
+    .migrate-box {
+      background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+      padding: 14px; margin-top: 14px;
+    }
+    .migrate-box h3 { font-size: 13px; color: #c9d1d9; margin-bottom: 10px; }
+
+    /* Progress bar */
+    .progress-bar {
+      width: 100%; height: 4px; background: #21262d; border-radius: 2px; margin-top: 6px; overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%; background: linear-gradient(90deg, #6b21a8, #a78bfa);
+      border-radius: 2px; transition: width 0.3s; width: 0%;
+    }
+
+    /* Divider */
+    .divider { border: none; border-top: 1px solid #21262d; margin: 14px 0; }
+
+    /* Platform toggles */
+    .platform-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    }
+
+    /* Toast */
+    #toastContainer { position: fixed; bottom: 20px; right: 20px; z-index: 9999; }
+    .toast {
+      background: #1f2937; color: #e0e0e0; padding: 10px 16px;
+      border-radius: 6px; margin-top: 8px; font-size: 13px;
+      border-left: 3px solid #a78bfa; animation: fadeIn 0.2s;
+    }
+    .toast.success { border-left-color: #4ade80; }
+    .toast.error { border-left-color: #f87171; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* Collapsible */
+    details summary {
+      cursor: pointer; font-size: 12px; color: #8b949e;
+      padding: 6px 0; user-select: none; list-style: none;
+    }
+    details summary::before { content: '▸ '; font-size: 10px; }
+    details[open] summary::before { content: '▾ '; }
+    details .details-body { margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>🧠 MemBrain</h1>
+  <div class="subtitle" id="versionInfo">Loading...</div>
+
+  <!-- ── Overview ─────────────────────────────────────────── -->
+  <div class="section">
+    <h2>Overview</h2>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="value" id="statConvs">-</div>
+        <div class="label">Conversations</div>
+      </div>
+      <div class="stat-card">
+        <div class="value" id="statFacts">-</div>
+        <div class="label">Facts</div>
+      </div>
+      <div class="stat-card">
+        <div class="value" id="statVectors">-</div>
+        <div class="label">Vectors</div>
+      </div>
+      <div class="stat-card">
+        <div class="value" id="statTokens">-</div>
+        <div class="label">Tokens</div>
+      </div>
+    </div>
+    <div class="status-row">
+      <span>Backend: <span class="status warn" id="backendStatus">checking…</span></span>
+      <span>Injector: <span class="status warn" id="injectorStatus">checking…</span></span>
+      <span>Memory: <span class="status info" id="memoryTierStatus">local</span></span>
+    </div>
+  </div>
+
+  <!-- ── Memory Tier ───────────────────────────────────────── -->
+  <div class="section">
+    <h2>Memory Tier</h2>
+
+    <!-- Free tier card -->
+    <div class="tier-card" id="freeTierCard">
+      <div class="tier-icon">🔒</div>
+      <div class="tier-body">
+        <div class="tier-name">Free — Local Vector Memory</div>
+        <div class="tier-desc">
+          Conversations captured and embedded entirely on your device.
+          Uses <code>all-MiniLM-L6-v2</code> (384d) via transformers.js.
+          No data leaves your browser.
+        </div>
+        <div class="tier-status" id="embedderStatus">
+          Embedder: <span class="status info">loading…</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Vector store stats (free tier) -->
+    <div id="localVectorStats">
+      <div class="vector-stats-grid">
+        <div class="vector-stat">
+          <div class="value" id="vsCount">-</div>
+          <div class="label">Embeddings</div>
+        </div>
+        <div class="vector-stat">
+          <div class="value" id="vsSizeKB">-</div>
+          <div class="label">Size (KB)</div>
+        </div>
+        <div class="vector-stat">
+          <div class="value" id="vsEmbedAvgMs">-</div>
+          <div class="label">Avg Embed (ms)</div>
+        </div>
+      </div>
+      <div class="hint" style="margin-top:8px;" id="embedderModelHint">Model: all-MiniLM-L6-v2 · 384 dimensions · quantized ~6MB</div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- Paid tier upgrade -->
+    <div class="tier-card" id="paidTierCard">
+      <div class="tier-icon">⚡</div>
+      <div class="tier-body">
+        <div class="tier-name">Paid — Cortex Cloud Vector Memory</div>
+        <div class="tier-desc">
+          Superior embedding model, multi-device sync, Qdrant-backed search.
+          Your local data is migrated automatically — zero data loss.
+        </div>
+      </div>
+    </div>
+
+    <!-- Upgrade / migrate form (shown when on free tier) -->
+    <div class="migrate-box" id="migrateBox">
+      <h3>Upgrade to Paid Tier</h3>
+      <div class="field">
+        <label>Cortex API Token</label>
+        <input type="password" id="cloudToken" placeholder="mbr_…" />
+        <div class="hint">Paste the token from your MemBrain subscription.</div>
+      </div>
+      <div class="checkbox-row" style="margin-top:8px;">
+        <input type="checkbox" id="clearLocalAfterMigrate" checked />
+        <span>Clear local embeddings after migration (saves ~space, facts are kept)</span>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-upgrade" id="migrateBtn">⚡ Migrate &amp; Upgrade</button>
+        <span id="migrateStatus" style="font-size:12px;color:#6e7681;"></span>
+      </div>
+      <div class="progress-bar" id="migrateProgress" style="display:none;">
+        <div class="progress-bar-fill" id="migrateProgressFill"></div>
+      </div>
+    </div>
+
+    <!-- Downgrade option (shown when on paid tier) -->
+    <div id="downgradeBox" style="display:none;margin-top:12px;">
+      <div class="hint">You are on the paid Cortex tier.
+        <a href="#" id="downgradeLink" style="color:#8b949e;text-decoration:underline;">Switch back to local</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Fact Extraction API ───────────────────────────────── -->
+  <div class="section">
+    <h2>Fact Extraction API</h2>
+    <div class="field">
+      <label>Provider</label>
+      <select id="apiProvider">
+        <option value="anthropic">Anthropic (Claude Haiku)</option>
+        <option value="openai">OpenAI (GPT-4o-mini)</option>
+        <option value="openrouter">OpenRouter</option>
+      </select>
+      <div class="hint">Used only for extracting facts from captured conversations.</div>
+    </div>
+    <div class="field">
+      <label>API Key</label>
+      <input type="password" id="apiKey" placeholder="Enter your API key…" />
+      <div class="hint">Stays in local IndexedDB. Only sent to the chosen provider during extraction.</div>
+    </div>
+    <div class="field">
+      <label>Model Override <span style="font-weight:400;text-transform:none;">(optional)</span></label>
+      <input type="text" id="apiModel" placeholder="Leave empty for default" />
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="saveApiBtn">Save API Settings</button>
+      <span id="apiSaveStatus" style="font-size:12px;color:#6e7681;"></span>
+    </div>
+  </div>
+
+  <!-- ── Auto-Injection ────────────────────────────────────── -->
+  <div class="section">
+    <h2>Auto-Injection</h2>
+    <div class="checkbox-row">
+      <input type="checkbox" id="injectorEnabled" />
+      <span>Automatically inject relevant memories into outgoing messages</span>
+    </div>
+    <div class="hint" style="margin-top:6px;">
+      A <code>&lt;memory_context&gt;</code> block is prepended to your messages.
+      Uses semantic search when vectors are available, keyword fallback otherwise.
+    </div>
+    <hr class="divider">
+    <details>
+      <summary>Advanced injection settings</summary>
+      <div class="details-body">
+        <div class="field">
+          <label>Max Facts to Inject</label>
+          <input type="number" id="maxFacts" min="1" max="20" value="8" style="width:80px;" />
+        </div>
+        <div class="field">
+          <label>Token Budget</label>
+          <input type="number" id="tokenBudget" min="100" max="2000" value="500" style="width:100px;" />
+        </div>
+        <div class="field">
+          <label>Similarity Threshold</label>
+          <input type="number" id="vectorThreshold" min="0.1" max="0.9" step="0.05" value="0.35" style="width:80px;" />
+          <div class="hint">Minimum cosine similarity for a fact to be injected (0.0–1.0). Higher = stricter relevance.</div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-secondary" id="saveInjectorBtn">Save Injection Settings</button>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ── Backend Sync ──────────────────────────────────────── -->
+  <div class="section">
+    <h2>Backend Sync <span class="badge" id="syncBadge">checking…</span></h2>
+    <div class="field">
+      <label>Backend URL</label>
+      <input type="text" id="backendUrl" placeholder="https://helix.millyweb.com" />
+    </div>
+    <div class="checkbox-row" style="margin-top:8px;">
+      <input type="checkbox" id="syncEnabled" checked />
+      <span>Auto-sync conversations every 2 minutes</span>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-secondary" id="flushNowBtn">↑ Sync Now</button>
+      <span id="syncStatus" style="font-size:12px;color:#6e7681;"></span>
+    </div>
+  </div>
+
+  <!-- ── Platforms ─────────────────────────────────────────── -->
+  <div class="section">
+    <h2>Platforms</h2>
+    <div class="hint" style="margin-bottom:12px;">Capture conversations from:</div>
+    <div class="platform-grid">
+      <div class="checkbox-row"><input type="checkbox" id="platClaude" checked /><span>Claude (claude.ai)</span></div>
+      <div class="checkbox-row"><input type="checkbox" id="platChatGPT" checked /><span>ChatGPT (chatgpt.com)</span></div>
+      <div class="checkbox-row"><input type="checkbox" id="platGemini" checked /><span>Gemini (gemini.google.com)</span></div>
+      <div class="checkbox-row"><input type="checkbox" id="platPerplexity" checked /><span>Perplexity (perplexity.ai)</span></div>
+    </div>
+  </div>
+
+  <!-- ── Data Management ──────────────────────────────────── -->
+  <div class="section">
+    <h2>Data Management</h2>
+    <div class="btn-row">
+      <button class="btn btn-secondary" id="extractNowBtn">🔍 Extract Facts Now</button>
+      <button class="btn btn-secondary" id="exportBtn">⤓ Export Data</button>
+      <button class="btn btn-secondary" id="importBtn">⤒ Import Data</button>
+      <button class="btn btn-danger" id="clearBtn">✕ Clear All</button>
+    </div>
+    <input type="file" id="importFile" accept=".json" style="display:none;" />
+    <div class="hint" style="margin-top:8px;">
+      Export backs up conversations, facts, settings, and sync log.
+      Vectors are not exported — they'll be regenerated from facts automatically.
+    </div>
+    <div id="extractStatus" style="margin-top:8px;font-size:12px;color:#6e7681;display:none;"></div>
+  </div>
+
+  <div id="toastContainer"></div>
+  <script src="options.js"></script>
+</body>
+</html>

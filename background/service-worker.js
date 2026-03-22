@@ -1,0 +1,886 @@
+/**
+ * MemBrain — Background Service Worker (v0.5.0)
+ * Event-driven architecture with dual Input/Output buses.
+ *
+ * Data flow (Input Bus):
+ *   interceptor → bridge.js → chrome.runtime.sendMessage
+ *     → SW message handler → inputBus.emit(EVENTS.TURN_CAPTURED)
+ *       → ConversationParser → IndexedDB
+ *       → FactExtractor (on flush)
+ *       → VectorStore.embed() (Item 9)
+ *
+ * Data flow (Output Bus):
+ *   outputBus.emit(EVENTS.INJECTION_READY) → bridge relay
+ *     → chrome.runtime.sendMessage to tab → content script
+ *       → window.postMessage → interceptor injects into request
+ *
+ * Adding new pipeline steps: just subscribe to the right bus event.
+ * No touching the message handler.
+ */
+
+import { ConversationParser } from '../lib/conversation-parser.js';
+import { memoryStorage } from '../lib/storage.js';
+import { FactExtractor } from '../lib/fact-extractor.js';
+import { MemoryInjector } from '../lib/memory-injector.js';
+import {
+  inputBus,
+  outputBus,
+  EVENTS,
+  isBusEvent,
+} from '../lib/event-bus.js';
+// Vector backend: lazy-loaded to avoid SW parse errors with transformers.min.js
+let _vectorBackendModule = null;
+async function getVectorBackend() {
+  if (!_vectorBackendModule) {
+    try { _vectorBackendModule = await import('../lib/vector-backend.js'); }
+    catch (e) { console.warn('[MemBrain] Vector backend unavailable:', e.message); return null; }
+  }
+  return _vectorBackendModule.getVectorBackend ? _vectorBackendModule.getVectorBackend() : null;
+}
+function resetVectorBackend() {
+  _vectorBackendModule = null;
+}
+
+// ==================== CONFIG ====================
+
+const CONFIG = {
+  BACKEND_URL: 'https://helix.millyweb.com',
+  API_KEY: 'ce-prod-6292b483717db14c83924a52715988ae',
+  FLUSH_INTERVAL_MINUTES: 2,
+  EXTENSION_VERSION: '0.5.2',
+};
+
+// ==================== INIT ====================
+
+const parser = new ConversationParser();
+const extractor = new FactExtractor(memoryStorage);
+const injector = new MemoryInjector(memoryStorage);
+let storageReady = false;
+let pendingTurns = [];
+
+async function initialize() {
+  try {
+    await memoryStorage.ready();
+    storageReady = true;
+
+    const existing = await memoryStorage.getConversations();
+    if (existing.length > 0) {
+      parser.loadConversations(existing);
+      console.debug(`[MemBrain] Loaded ${existing.length} conversations`);
+    }
+
+    await extractor.configure();
+    await injector.configure();
+
+    // Warm up the local embedding model (non-blocking — fires in background)
+    getVectorBackend().then(backend => backend.warmUp()).catch(() => {});
+
+    if (pendingTurns.length > 0) {
+      for (const turn of pendingTurns) {
+        inputBus.emit(EVENTS.TURN_CAPTURED, turn);
+      }
+      pendingTurns = [];
+    }
+
+    inputBus.emit(EVENTS.SW_READY, { version: CONFIG.EXTENSION_VERSION });
+    console.debug(`[MemBrain] SW v${CONFIG.EXTENSION_VERSION} ready`);
+  } catch (e) {
+    console.error('[MemBrain] Init failed:', e);
+    inputBus.emit(EVENTS.PIPELINE_ERROR, { phase: 'init', error: e.message });
+  }
+}
+
+initialize();
+
+// ==================== INPUT BUS HANDLERS ====================
+// Each handler is a self-contained module — no switch statement sprawl.
+
+/**
+ * TURN_CAPTURED → parse + persist conversation
+ */
+inputBus.on(EVENTS.TURN_CAPTURED, async (turn) => {
+  try {
+    const result = parser.ingestTurns([turn]);
+
+    if (result.newTurns > 0 && result.updatedConversations.length > 0) {
+      const toSave = result.updatedConversations
+        .map(key => parser.exportForSync(key))
+        .filter(Boolean);
+
+      if (toSave.length > 0) {
+        await memoryStorage.saveConversations(toSave);
+        console.debug(`[MemBrain] Persisted ${toSave.length} conversations`);
+
+        for (const conv of toSave) {
+          outputBus.emit(EVENTS.CONVERSATION_UPDATED, {
+            id: conv.id,
+            platform: conv.platform,
+            turnCount: conv.turnCount,
+          });
+        }
+      }
+    }
+
+    await incrementStat('totalTurns');
+    await incrementStat(`turns_${turn.platform}`);
+
+    // Update badge
+    const stats = await memoryStorage.getConversationStats();
+    outputBus.emit(EVENTS.BADGE_UPDATE, { count: stats.unsynced });
+  } catch (e) {
+    console.error('[MemBrain] Turn processing failed:', e);
+    outputBus.emit(EVENTS.PIPELINE_ERROR, { phase: 'turn_captured', error: e.message });
+  }
+});
+
+/**
+ * REQUEST_INTERCEPTED → extract user message → emit TURN_CAPTURED
+ */
+inputBus.on(EVENTS.REQUEST_INTERCEPTED, async (data) => {
+  // Buffer raw request for popup display
+  try {
+    const result = await chrome.storage.session.get('captured_requests');
+    const requests = result.captured_requests || [];
+    requests.push({ id: generateId(), ...data, timestamp: data.timestamp || Date.now() });
+    if (requests.length > 50) requests.splice(0, requests.length - 50);
+    await chrome.storage.session.set({ captured_requests: requests });
+  } catch { /* non-critical */ }
+
+  // Extract user message and re-emit as a turn
+  try {
+    const parsed = JSON.parse(data.body);
+    const userContent = extractUserMessage(parsed, data.platform);
+    if (userContent) {
+      inputBus.emit(EVENTS.TURN_CAPTURED, {
+        id: generateId(),
+        platform: data.platform,
+        conversationId: data.conversationId,
+        role: 'user',
+        content: userContent,
+        captureType: 'request',
+        url: data.url,
+        timestamp: data.timestamp || Date.now(),
+        tabId: data.tabId,
+        flushed: false,
+      });
+    }
+  } catch { /* body wasn't JSON */ }
+});
+
+/**
+ * FACTS_EXTRACTED → save to IndexedDB, emit FACT_SAVED per fact
+ * (VectorStore will subscribe to FACT_SAVED in Item 9)
+ */
+inputBus.on(EVENTS.FACTS_EXTRACTED, async ({ facts, conversationId }) => {
+  if (!facts?.length) return;
+
+  for (const fact of facts) {
+    try {
+      const id = await memoryStorage.saveFact(fact);
+      inputBus.emit(EVENTS.FACT_SAVED, { ...fact, id });
+    } catch (e) {
+      console.error('[MemBrain] Failed to save fact:', e);
+    }
+  }
+
+  console.debug(`[MemBrain] Saved ${facts.length} facts from ${conversationId}`);
+  outputBus.emit(EVENTS.STATS_UPDATE, { factsAdded: facts.length });
+});
+
+/**
+ * FLUSH_REQUESTED → flush to backend → emit FLUSH_COMPLETE or FLUSH_ERROR
+ */
+inputBus.on(EVENTS.FLUSH_REQUESTED, async () => {
+  const result = await flushToBackend();
+  if (result.status === 'error') {
+    outputBus.emit(EVENTS.FLUSH_ERROR, result);
+  } else {
+    outputBus.emit(EVENTS.FLUSH_COMPLETE, result);
+
+    // Trigger fact extraction after successful flush
+    if (extractor.isConfigured()) {
+      const extractResult = await extractor.extractAll({ maxConversations: 3, minTurns: 4 });
+      if (extractResult.totalNewFacts > 0) {
+        inputBus.emit(EVENTS.FACTS_EXTRACTED, {
+          facts: extractResult.newFacts || [],
+          conversationId: 'batch-extract',
+        });
+      }
+    }
+  }
+});
+
+/**
+ * FACT_SAVED → embed and store in vector store
+ * This is the Item 9 pipeline hook.
+ * The EVENTS.FACT_SAVED is emitted inside the FACTS_EXTRACTED handler above.
+ */
+inputBus.on(EVENTS.FACT_SAVED, async (fact) => {
+  try {
+    const backend = await getVectorBackend();
+    const stored = await backend.embedAndStore(fact);
+    if (stored) {
+      console.debug(`[MemBrain] Embedded fact: ${fact.id.substring(0, 12)}...`);
+    }
+  } catch (e) {
+    console.error('[MemBrain] FACT_SAVED embed failed:', e);
+  }
+});
+
+/**
+ * TIER_UPGRADED → reset backend singleton so next call picks up cloud tier
+ */
+inputBus.on(EVENTS.TIER_UPGRADED, async ({ token, cortexUrl, clearLocal }) => {
+  if (!_vectorBackendModule) { try { _vectorBackendModule = await import('../lib/vector-backend.js'); } catch(e) { throw new Error('Vector backend unavailable'); } }
+  const { VectorBackendFactory } = _vectorBackendModule;
+  const result = await VectorBackendFactory.migrate(token, { cortexUrl, clearLocal });
+  resetVectorBackend(); // Force re-init on next call
+  inputBus.emit(EVENTS.MIGRATION_COMPLETE, result);
+  outputBus.emit(EVENTS.STATS_UPDATE, { migration: result });
+});
+
+/**
+ * API_CONFIGURED → re-initialize extractor + injector
+ */
+inputBus.on(EVENTS.API_CONFIGURED, async (data) => {
+  if (data.apiKey) await memoryStorage.setSetting('apiKey', data.apiKey);
+  if (data.apiProvider) await memoryStorage.setSetting('apiProvider', data.apiProvider);
+  if (data.apiModel) await memoryStorage.setSetting('apiModel', data.apiModel);
+  await extractor.configure();
+  outputBus.emit(EVENTS.STATS_UPDATE, {
+    extractorConfigured: extractor.isConfigured(),
+    extractorStats: extractor.getStats(),
+  });
+});
+
+/**
+ * INJECTOR_TOGGLED → update injector state
+ */
+inputBus.on(EVENTS.INJECTOR_TOGGLED, async ({ enabled }) => {
+  await injector.setEnabled(!!enabled);
+  outputBus.emit(EVENTS.STATS_UPDATE, { injectorEnabled: injector.isEnabled() });
+});
+
+/**
+ * DATA_CLEARED → wipe storage + reset parser
+ */
+inputBus.on(EVENTS.DATA_CLEARED, async () => {
+  await memoryStorage.clearAll();
+  parser.loadConversations([]);
+  outputBus.emit(EVENTS.BADGE_UPDATE, { count: 0 });
+  outputBus.emit(EVENTS.STATS_UPDATE, { cleared: true });
+});
+
+// ==================== OUTPUT BUS HANDLERS ====================
+
+/**
+ * BADGE_UPDATE → update extension badge
+ */
+outputBus.on(EVENTS.BADGE_UPDATE, ({ count }) => {
+  updateBadge(count);
+});
+
+// ==================== CHROME RUNTIME MESSAGE HANDLER ====================
+// Thin translation layer: chrome.runtime message → inputBus event
+// or direct action for popup queries.
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message) return;
+
+  const tabId = sender.tab?.id;
+
+  // ── Forwarded bus events from bridge.js ──────────────────────
+  if (isBusEvent(message)) {
+    // Attach tabId so downstream handlers know which tab
+    inputBus.emit(message.event, { ...message.payload, tabId });
+    sendResponse({ received: true });
+    return true;
+  }
+
+  // ── Legacy action-based messages (backwards compat) ──────────
+  switch (message.action) {
+    // Capture events (translate to bus)
+    case 'conversation-turn':
+      handleLegacyTurn(message.data, tabId);
+      sendResponse({ received: true });
+      return false;
+
+    case 'request-outgoing':
+      inputBus.emit(EVENTS.REQUEST_INTERCEPTED, { ...message.data, tabId });
+      sendResponse({ received: true });
+      return false;
+
+    case 'interceptor-status':
+      handleInterceptorStatus(message.data, tabId);
+      sendResponse({ received: true });
+      return false;
+
+    case 'error-report':
+      console.warn(`[MemBrain] Error from ${message.data?.platform}:`, message.data?.error);
+      sendResponse({ received: true });
+      return false;
+
+    // Popup queries (async — must return true)
+    case 'manual-flush':
+      inputBus.emit(EVENTS.FLUSH_REQUESTED, {});
+      outputBus.once(EVENTS.FLUSH_COMPLETE, sendResponse);
+      outputBus.once(EVENTS.FLUSH_ERROR, sendResponse);
+      return true;
+
+    case 'get-flush-status':
+      getFlushStatus().then(sendResponse);
+      return true;
+
+    case 'get-conversations':
+      getConversationsForPopup(message.data).then(sendResponse);
+      return true;
+
+    case 'get-stats':
+      getFullStats().then(sendResponse);
+      return true;
+
+    case 'export-data':
+      memoryStorage.exportAll().then(sendResponse);
+      return true;
+
+    case 'import-data':
+      memoryStorage.importAll(message.data).then((result) => {
+        inputBus.emit(EVENTS.DATA_IMPORTED, result);
+        sendResponse(result);
+      });
+      return true;
+
+    case 'extract-facts':
+      extractFacts(message.data).then(sendResponse);
+      return true;
+
+    case 'get-facts':
+      memoryStorage.getFacts(message.data).then(sendResponse);
+      return true;
+
+    case 'configure-api':
+      inputBus.emit(EVENTS.API_CONFIGURED, message.data);
+      // Respond after extractor re-configures
+      setTimeout(async () => {
+        sendResponse({ configured: extractor.isConfigured(), stats: extractor.getStats() });
+      }, 200);
+      return true;
+
+    case 'get-injection':
+      getInjectionForPage(message.data).then(sendResponse);
+      return true;
+
+    case 'context-injected':
+      // Store v2 inject stats (shard+RAG) to session storage for popup HUD
+      (async () => {
+        try {
+          const payload = message.data || {};
+          const existing = await chrome.storage.session.get('contextInjectStats').catch(() => ({}));
+          const prev = existing.contextInjectStats || {};
+          await chrome.storage.session.set({
+            contextInjectStats: {
+              injections:   (prev.injections || 0) + 1,
+              shardChars:   payload.shardChars  || 0,
+              ragChars:     payload.ragChars    || 0,
+              totalChars:   payload.totalChars  || 0,
+              layers:       payload.layers      || [],
+              lastQuery:    payload.query       || '',
+              lastConvId:   payload.convId      || '',
+              lastAt:       Date.now(),
+            }
+          }).catch(() => {});
+        } catch {}
+      })();
+      sendResponse({ ok: true });
+      return false;
+
+    case 'get-context-inject-stats':
+      chrome.storage.session.get('contextInjectStats')
+        .then(r => sendResponse(r.contextInjectStats || null))
+        .catch(() => sendResponse(null));
+      return true;
+
+    case 'injection-applied':
+      outputBus.emit(EVENTS.INJECTION_APPLIED, message.data);
+      sendResponse({ ok: true });
+      return false;
+
+    case 'set-injector':
+      inputBus.emit(EVENTS.INJECTOR_TOGGLED, { enabled: !!message.data?.enabled });
+      sendResponse({ enabled: injector.isEnabled() });
+      return false;
+
+    case 'clear-data':
+      inputBus.emit(EVENTS.DATA_CLEARED, {});
+      sendResponse({ cleared: true });
+      return false;
+
+    // ── New v0.5.1 options page messages ─────────────────────
+
+    case 'get-vector-stats':
+      getVectorStats().then(sendResponse);
+      return true;
+
+    case 'get-tier-state':
+      getTierState().then(sendResponse);
+      return true;
+
+    case 'get-all-settings':
+      getAllSettingsForOptions().then(sendResponse);
+      return true;
+
+    case 'save-settings':
+      saveSettingsFromOptions(message.data).then(sendResponse);
+      return true;
+
+    case 'tier-upgrade':
+      handleTierUpgrade(message.data).then(sendResponse);
+      return true;
+
+    case 'tier-downgrade':
+      handleTierDowngrade().then(sendResponse);
+      return true;
+  }
+
+  sendResponse({ received: true });
+  return true;
+});
+
+// ==================== LEGACY COMPAT ====================
+
+async function handleLegacyTurn(data, tabId) {
+  if (!data) return;
+  const turn = {
+    id: generateId(),
+    platform: data.platform,
+    conversationId: data.conversationId,
+    role: data.role || 'assistant',
+    content: data.content || '',
+    captureType: data.captureType || 'unknown',
+    url: data.url || data.tabUrl || '',
+    timestamp: data.timestamp || Date.now(),
+    tabId,
+    flushed: false,
+  };
+
+  // Buffer in session for popup
+  await bufferTurnInSession(turn);
+
+  if (storageReady) {
+    inputBus.emit(EVENTS.TURN_CAPTURED, turn);
+  } else {
+    pendingTurns.push(turn);
+  }
+}
+
+async function handleInterceptorStatus(data, tabId) {
+  try {
+    const result = await chrome.storage.session.get('interceptor_status');
+    const status = result.interceptor_status || {};
+    status[tabId] = { ...data, timestamp: data.timestamp || Date.now() };
+    await chrome.storage.session.set({ interceptor_status: status });
+  } catch { /* non-critical */ }
+}
+
+// ==================== BACKEND FLUSH ====================
+
+async function flushToBackend() {
+  try {
+    const unsynced = await memoryStorage.getUnsyncedConversations();
+    if (unsynced.length === 0) return { status: 'no_conversations', flushed: 0 };
+
+    const allTurns = [];
+    for (const conv of unsynced) {
+      for (const turn of (conv.turns || [])) {
+        allTurns.push({
+          id: turn.id || generateId(),
+          platform: conv.platform,
+          conversationId: conv.conversationId,
+          role: turn.role,
+          content: turn.content,
+          captureType: turn.captureType || 'parsed',
+          timestamp: turn.timestamp,
+        });
+      }
+    }
+
+    if (allTurns.length === 0) return { status: 'no_turns', flushed: 0 };
+
+    const response = await fetch(`${CONFIG.BACKEND_URL}/api/v1/ext/ingest`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': CONFIG.API_KEY,
+      },
+      body: JSON.stringify({
+        turns: allTurns,
+        extensionVersion: CONFIG.EXTENSION_VERSION,
+        flushedAt: new Date().toISOString(),
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`HTTP ${response.status}: ${errorText}`);
+    }
+
+    const responseData = await response.json();
+
+    for (const conv of unsynced) {
+      await memoryStorage.markSynced(conv.id);
+    }
+
+    await memoryStorage.logSync({
+      conversationsFlushed: unsynced.length,
+      turnsFlushed: allTurns.length,
+      backendResponse: responseData,
+      status: 'ok',
+    });
+
+    await incrementStat('totalFlushes');
+    await incrementStat('totalFlushedTurns', allTurns.length);
+
+    const stats = await memoryStorage.getConversationStats();
+    outputBus.emit(EVENTS.BADGE_UPDATE, { count: stats.unsynced });
+
+    return {
+      status: 'flushed',
+      conversations: unsynced.length,
+      turns: allTurns.length,
+      backendSuccess: responseData.success || 0,
+    };
+  } catch (e) {
+    console.error('[MemBrain] Flush failed:', e);
+    await memoryStorage.logSync({ error: e.message, status: 'error' });
+    await incrementStat('flushErrors');
+    return { status: 'error', error: e.message };
+  }
+}
+
+// ==================== POPUP/UI DATA ====================
+
+async function getConversationsForPopup(options = {}) {
+  try {
+    const convs = await memoryStorage.getConversations({ limit: options?.limit || 20, platform: options?.platform });
+    return {
+      conversations: convs.map(c => ({
+        id: c.id,
+        platform: c.platform,
+        title: c.title || '(untitled)',
+        turnCount: c.turnCount,
+        tokenEstimate: c.tokenEstimate,
+        updatedAt: c.updatedAt,
+        synced: c.syncedAt && c.syncedAt >= c.updatedAt,
+      })),
+      total: convs.length,
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function getFullStats() {
+  try {
+    const dbStats = await memoryStorage.getConversationStats();
+    const sessionData = await chrome.storage.session.get(['captured_turns', 'capture_stats', 'flush_log']);
+    const syncLog = await memoryStorage.getSyncLog(5);
+
+    return {
+      db: dbStats,
+      session: {
+        bufferedTurns: (sessionData.captured_turns || []).length,
+        ...(sessionData.capture_stats || {}),
+      },
+      lastSync: syncLog.length > 0 ? syncLog[0] : null,
+      version: CONFIG.EXTENSION_VERSION,
+      extractor: extractor.getStats(),
+      injector: injector.getStats(),
+      backendUrl: CONFIG.BACKEND_URL,
+      bus: {
+        inputEvents: inputBus.activeEvents(),
+        outputEvents: outputBus.activeEvents(),
+        inputListeners: inputBus.listenerCount(),
+        outputListeners: outputBus.listenerCount(),
+      },
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function getFlushStatus() {
+  try {
+    const stats = await memoryStorage.getConversationStats();
+    const syncLog = await memoryStorage.getSyncLog(5);
+    return {
+      conversations: stats.conversations,
+      unsynced: stats.unsynced,
+      totalTurns: stats.totalTurns,
+      platforms: stats.platforms,
+      lastSync: syncLog.length > 0 ? syncLog[0] : null,
+      backendUrl: CONFIG.BACKEND_URL,
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function extractFacts(options = {}) {
+  try {
+    await extractor.configure();
+    if (!extractor.isConfigured()) {
+      return { error: 'API key not configured. Go to Settings to add your API key.' };
+    }
+    const result = await extractor.extractAll(options);
+    if (result.totalNewFacts > 0) {
+      inputBus.emit(EVENTS.FACTS_EXTRACTED, {
+        facts: result.newFacts || [],
+        conversationId: 'manual-extract',
+      });
+    }
+    return result;
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function getInjectionForPage(data) {
+  try {
+    await injector.configure();
+    if (!injector.isEnabled()) return { enabled: false, block: '', facts: [] };
+
+    const facts = await memoryStorage.getFacts();
+    if (!facts.length) return { enabled: true, block: '', facts: [] };
+
+    let selectedFacts = [];
+
+    // ── Semantic search (if vector backend is ready) ──────────────────────────
+    // Use the outgoing message as the query for relevance-ranked injection.
+    const userMessage = data?.userMessage || ''; // passed from interceptor when available
+    if (userMessage.trim().length > 5) {
+      try {
+        const backend = await getVectorBackend();
+        const vectorResults = await backend.search(userMessage, { topK: 8, threshold: 0.3 });
+
+        if (vectorResults.length > 0) {
+          // Map vector results back to full fact objects
+          const factMap = Object.fromEntries(facts.map(f => [f.id, f]));
+          selectedFacts = vectorResults
+            .map(r => ({ ...factMap[r.factId], _score: r.score }))
+            .filter(Boolean)
+            .slice(0, 8);
+        }
+      } catch (e) {
+        console.warn('[MemBrain] Vector search failed, falling back to keyword:', e.message);
+      }
+    }
+
+    // ── Keyword fallback (if semantic gave no results or no message context) ──
+    if (!selectedFacts.length) {
+      selectedFacts = facts
+        .sort((a, b) => {
+          const w = { high: 3, medium: 2, low: 1 };
+          return (w[b.confidence] || 0) - (w[a.confidence] || 0) || (b.timestamp || 0) - (a.timestamp || 0);
+        })
+        .slice(0, 8);
+    }
+
+    const block = `<memory_context>\n${selectedFacts.map(f => `- ${f.content} (${f.confidence || 'medium'})`).join('\n')}\n</memory_context>`;
+
+    return {
+      enabled: true,
+      block,
+      facts: selectedFacts.map(f => ({
+        content: f.content,
+        category: f.category,
+        confidence: f.confidence,
+        score: f._score,
+      })),
+      method: selectedFacts[0]?._score ? 'semantic' : 'keyword',
+    };
+  } catch (e) {
+    return { enabled: false, block: '', facts: [], error: e.message };
+  }
+}
+
+
+// ==================== OPTIONS PAGE HANDLERS ====================
+
+async function getVectorStats() {
+  try {
+    const backend = await getVectorBackend();
+    return backend.getStats();
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function getTierState() {
+  try {
+    const tier = await memoryStorage.getSetting('storageMode', 'local');
+    return { tier };
+  } catch (e) {
+    return { tier: 'local', error: e.message };
+  }
+}
+
+async function getAllSettingsForOptions() {
+  try {
+    const keys = [
+      'injectorEnabled', 'maxFactsToInject', 'tokenBudget', 'vectorThreshold',
+      'backendUrl', 'apiProvider', 'apiModel', 'storageMode',
+    ];
+    const result = {};
+    for (const key of keys) {
+      result[key] = await memoryStorage.getSetting(key);
+    }
+    // Return last 4 chars of API key as hint (never the full key)
+    const apiKey = await memoryStorage.getSetting('apiKey');
+    if (apiKey && apiKey.length >= 4) {
+      result.apiKeyHint = apiKey.slice(-4);
+    }
+    return result;
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function saveSettingsFromOptions(data) {
+  try {
+    const allowed = ['maxFactsToInject', 'tokenBudget', 'vectorThreshold', 'backendUrl', 'syncEnabled'];
+    for (const key of allowed) {
+      if (data[key] !== undefined) {
+        await memoryStorage.setSetting(key, data[key]);
+      }
+    }
+    return { saved: true };
+  } catch (e) {
+    return { saved: false, error: e.message };
+  }
+}
+
+async function handleTierUpgrade(data) {
+  if (!data?.token) return { success: false, error: 'No token provided' };
+  inputBus.emit(EVENTS.TIER_UPGRADED, {
+    token: data.token,
+    cortexUrl: data.cortexUrl,
+    clearLocal: data.clearLocal !== false,
+  });
+  // Wait for migration to complete via a one-shot bus listener
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve({ success: false, error: 'Migration timed out' }), 60000);
+    inputBus.once(EVENTS.MIGRATION_COMPLETE, (result) => {
+      clearTimeout(timeout);
+      resolve(result);
+    });
+  });
+}
+
+async function handleTierDowngrade() {
+  try {
+    if (!_vectorBackendModule) { try { _vectorBackendModule = await import('../lib/vector-backend.js'); } catch(e) { throw new Error('Vector backend unavailable'); } }
+  const { VectorBackendFactory } = _vectorBackendModule;
+    await VectorBackendFactory.downgradeToLocal();
+    resetVectorBackend();
+    return { success: true, tier: 'local' };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// ==================== ALARMS ====================
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'memory-flush') {
+    inputBus.emit(EVENTS.FLUSH_REQUESTED, { source: 'alarm' });
+  }
+  if (alarm.name === 'memory-extract') {
+    await extractFacts({ maxConversations: 3, minTurns: 4 });
+  }
+});
+
+chrome.alarms.create('memory-flush', { periodInMinutes: CONFIG.FLUSH_INTERVAL_MINUTES });
+chrome.alarms.create('memory-extract', { periodInMinutes: 10 });
+
+// ==================== UTILITIES ====================
+
+function extractUserMessage(parsed, platform) {
+  switch (platform) {
+    case 'claude':
+      if (parsed.prompt) return parsed.prompt;
+      if (parsed.messages) {
+        const last = parsed.messages[parsed.messages.length - 1];
+        if (last?.role === 'user') {
+          return typeof last.content === 'string'
+            ? last.content
+            : last.content?.map(c => c.text || '').join('') || null;
+        }
+      }
+      return null;
+    case 'chatgpt':
+      if (parsed.messages) {
+        const last = parsed.messages[parsed.messages.length - 1];
+        if (last?.content?.parts) return last.content.parts.join('');
+        if (last?.content) return typeof last.content === 'string' ? last.content : null;
+      }
+      if (parsed.action === 'next' && parsed.messages?.[0]?.content?.parts) {
+        return parsed.messages[0].content.parts.join('');
+      }
+      return null;
+    default:
+      if (parsed.query) return parsed.query;
+      if (parsed.prompt) return parsed.prompt;
+      if (parsed.messages) {
+        const last = parsed.messages[parsed.messages.length - 1];
+        return last?.content || null;
+      }
+      return null;
+  }
+}
+
+function generateId() {
+  return `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+}
+
+async function incrementStat(key, amount = 1) {
+  try {
+    const result = await chrome.storage.session.get('capture_stats');
+    const stats = result.capture_stats || {};
+    stats[key] = (stats[key] || 0) + amount;
+    stats.lastUpdate = Date.now();
+    await chrome.storage.session.set({ capture_stats: stats });
+  } catch { /* non-critical */ }
+}
+
+function updateBadge(count) {
+  try {
+    if (count > 0) {
+      chrome.action.setBadgeText({ text: String(count) });
+      chrome.action.setBadgeBackgroundColor({ color: '#6B5CE7' });
+    } else {
+      chrome.action.setBadgeText({ text: '✓' });
+      chrome.action.setBadgeBackgroundColor({ color: '#4ade80' });
+    }
+  } catch { /* badge API might not be available */ }
+}
+
+async function bufferTurnInSession(turn) {
+  try {
+    const result = await chrome.storage.session.get('captured_turns');
+    const turns = result.captured_turns || [];
+    turns.push(turn);
+    if (turns.length > 200) turns.splice(0, turns.length - 200);
+    await chrome.storage.session.set({ captured_turns: turns });
+  } catch { /* non-critical */ }
+}
+
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  try {
+    const result = await chrome.storage.session.get('interceptor_status');
+    const status = result.interceptor_status || {};
+    delete status[tabId];
+    await chrome.storage.session.set({ interceptor_status: status });
+  } catch { /* non-critical */ }
+});
+
+console.debug(`[MemBrain] Service worker v${CONFIG.EXTENSION_VERSION} started`);
