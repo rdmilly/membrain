@@ -1,27 +1,56 @@
-# 🧠 MemBrain
+# 🧠 MemBrain v0.6.0
+
+> AI conversation memory, compression & context injection — Chrome extension
 
 [![CI](https://github.com/rdmilly/membrain/actions/workflows/ci.yml/badge.svg)](https://github.com/rdmilly/membrain/actions/workflows/ci.yml)
+[![README](https://github.com/rdmilly/membrain/actions/workflows/readme.yml/badge.svg)](https://github.com/rdmilly/membrain/actions)
+![Version](https://img.shields.io/badge/version-0.6.0-blue?style=flat-square)
+![MV3](https://img.shields.io/badge/Chrome-MV3-red?style=flat-square)
 
-> AI conversation memory, compression & context injection browser extension
+**[🌐 Live Dashboard →](https://helixmaster.millyweb.com)**
 
-**Current version: v0.5.6**
+---
 
 ## What it does
 
-- **Memory** — captures conversations from Claude, ChatGPT, Gemini, Perplexity
-- **Compression** — replaces repeated phrases with `§` symbols, cutting token usage
-- **Context Injection** — injects relevant past context into every new message automatically  
-- **⚡CI tab** — live stream of injections, § symbol growth, and token savings in real-time
+| Feature | Description |
+|---------|-------------|
+| 🧠 **Memory** | Captures conversations from Claude, ChatGPT, Gemini, Perplexity |
+| ⚡ **Compression** | Replaces repeated phrases with `§` symbols, cutting token usage |
+| 🔍 **Context Injection** | Injects relevant past context into every new message |
+| 📊 **⚡CI Tab** | Live stream of injections, symbol growth, and token savings |
 
-## Install (unpacked)
+## Install
 
-1. Download zip from [Releases](https://github.com/rdmilly/membrain/releases)
-2. Extract → `chrome://extensions` → Developer mode on → Load unpacked → select folder
+1. Download latest zip from [helixmaster.millyweb.com](https://helixmaster.millyweb.com)
+2. Extract → `chrome://extensions` → Developer mode on → Load unpacked → select `memory-ext/`
 
-## Built with
+## Architecture
 
-- Chrome Extension Manifest V3
-- transformers.js (local offline embeddings)
-- [Helix Cortex](https://github.com/rdmilly/helix) backend
+```
+Page load → SW injects interceptors into MAIN world (bypasses CSP)
+                    ↓
+        Fetch hook captures AI API calls
+                    ↓
+  Context injected before every message → Helix Cortex
+                    ↓
+     HUD: tokens · captures · ⚡CI live stream
+```
 
-Built in public as part of [Millyweb](https://millyweb.com).
+## HUD Tabs
+
+- **TOKENS** — Input/Output/Total + compression savings
+- **CAPTURES** — Conversations captured, sync status
+- **⚡CI** — Live injection stream, § symbol dictionary
+
+## Stack
+
+`Chrome MV3` `Service Workers` `chrome.scripting MAIN world` `transformers.js` `IndexedDB`
+
+## Backend
+
+Powered by [Helix Cortex](https://github.com/rdmilly/helix)
+
+---
+
+*README auto-updated on every push · Built in public at [helixmaster.millyweb.com](https://helixmaster.millyweb.com)*

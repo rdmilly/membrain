@@ -1,0 +1,102 @@
+name: Update README
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get version
+        id: ver
+        run: |
+          VERSION=$(cat manifest.json | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "updated=$(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_OUTPUT
+          COMMITS=$(git rev-list --count HEAD)
+          echo "commits=$COMMITS" >> $GITHUB_OUTPUT
+
+      - name: Regenerate README
+        run: |
+          cat > README.md << EOF
+# 🧠 MemBrain v${{ steps.ver.outputs.version }}
+
+> AI conversation memory, compression \& context injection — Chrome extension
+
+[![CI](https://github.com/rdmilly/membrain/actions/workflows/ci.yml/badge.svg)](https://github.com/rdmilly/membrain/actions/workflows/ci.yml)
+[![README](https://github.com/rdmilly/membrain/actions/workflows/readme.yml/badge.svg)](https://github.com/rdmilly/membrain/actions)
+![Version](https://img.shields.io/badge/version-${{ steps.ver.outputs.version }}-blue?style=flat-square)
+![Commits](https://img.shields.io/badge/commits-${{ steps.ver.outputs.commits }}-green?style=flat-square)
+![MV3](https://img.shields.io/badge/Chrome-MV3-red?style=flat-square)
+
+**[🌐 Live Dashboard →](https://helixmaster.millyweb.com)**
+
+---
+
+## What it does
+
+MemBrain runs silently in your browser and makes every AI conversation smarter:
+
+| Feature | Description |
+|---------|-------------|
+| 🧠 **Memory** | Captures conversations from Claude, ChatGPT, Gemini, Perplexity |
+| ⚡ **Compression** | Replaces repeated phrases with \`§\` symbols, cutting token usage |
+| 🔍 **Context Injection** | Injects relevant past context into every new message |
+| 📊 **CI Tab** | Live stream of injections, symbol growth, and token savings |
+
+## Install
+
+1. Download \`membrain-v${{ steps.ver.outputs.version }}.zip\` from [Releases](https://github.com/rdmilly/membrain/releases) or [helixmaster.millyweb.com](https://helixmaster.millyweb.com)
+2. Extract the zip
+3. Open \`chrome://extensions\` → Enable **Developer mode**
+4. Click **Load unpacked** → select the \`memory-ext\` folder
+5. Open Claude.ai and start chatting
+
+## Architecture
+
+\`\`\`
+Page load → SW injects interceptor.js + compression.js + context-inject.js (MAIN world)
+                          ↓
+              Fetch hook captures all AI API calls
+                          ↓
+         Context injected before every message → Helix Cortex backend
+                          ↓
+              HUD displays tokens · captures · ⚡CI stream
+\`\`\`
+
+## HUD Tabs
+
+- **TOKENS** — Input/Output/Total per conversation + session, compression savings
+- **CAPTURES** — Intercepted conversations, sync status, DB stats
+- **⚡CI** — Live injection stream, § symbol dictionary, compression events
+
+## Built with
+
+\`Chrome Extension MV3\` \`Manifest V3\` \`Service Workers\` \`chrome.scripting\` \`transformers.js\`
+
+## Backend
+
+Powered by [Helix Cortex](https://github.com/rdmilly/helix) — self-hosted AI intelligence platform.
+
+---
+
+*README auto-updated on every push · v${{ steps.ver.outputs.version }} · ${{ steps.ver.outputs.updated }}*
+EOF
+
+      - name: Commit README
+        run: |
+          git config user.name 'Helix Bot'
+          git config user.email 'helix@millyweb.com'
+          git add README.md
+          git diff --staged --quiet || git commit -m 'docs: auto-update README'
+          git push
