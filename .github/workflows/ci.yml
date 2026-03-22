@@ -1,24 +1,41 @@
 name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+
 jobs:
-  syntax-check:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Syntax check
+
+      - name: Syntax check all JS
         run: |
           ERRORS=0
           for f in $(find . -name '*.js' | grep -v transformers.min | grep -v node_modules | sort); do
-            node --check "$f" 2>/dev/null || { echo "ERROR: $f"; ERRORS=$((ERRORS+1)); }
+            node --check "$f" 2>/dev/null || { echo "FAIL: $f"; ERRORS=$((ERRORS+1)); }
           done
-          [ $ERRORS -eq 0 ] && echo 'All clean' || exit 1
+          [ $ERRORS -eq 0 ] && echo "All clean" || exit 1
+
       - name: No triple-quotes
         run: |
-          grep -rn "'''" --include='*.js' . | grep -v transformers.min | grep -v node_modules && exit 1 || echo 'Clean'
+          grep -rn "'''" --include='*.js' . | grep -v transformers.min && exit 1 || true
+
+      - name: Version consistency
+        run: |
+          V=$(cat manifest.json | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")
+          echo "Version: $V"
+          grep -q "$V" CHANGELOG.md || { echo "CHANGELOG missing entry for $V"; exit 1; }
+
+      - name: Commit message format check
+        run: |
+          MSG=$(git log -1 --pretty=%s)
+          echo "Commit: $MSG"
+          # Should start with vX.Y.Z
+          echo "$MSG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+' || { echo "Commit must start with version e.g. v0.5.9 - description"; exit 1; }
