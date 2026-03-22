@@ -1,0 +1,24 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Syntax check
+        run: |
+          ERRORS=0
+          for f in $(find . -name '*.js' | grep -v transformers.min | grep -v node_modules | sort); do
+            node --check "$f" 2>/dev/null || { echo "ERROR: $f"; ERRORS=$((ERRORS+1)); }
+          done
+          [ $ERRORS -eq 0 ] && echo 'All clean' || exit 1
+      - name: No triple-quotes
+        run: |
+          grep -rn "'''" --include='*.js' . | grep -v transformers.min | grep -v node_modules && exit 1 || echo 'Clean'
