@@ -921,16 +921,28 @@ function shouldInject(url) {
 async function injectInterceptors(tabId, url) {
   if (!shouldInject(url)) return;
   try {
+    // Use func injection (most reliable - no file path issues, works on any load state)
     for (const file of INJECT_SCRIPTS) {
+      const fileUrl = chrome.runtime.getURL(file);
+      const resp = await fetch(fileUrl);
+      const code = await resp.text();
       await chrome.scripting.executeScript({
         target: { tabId },
-        files: [file],
         world: 'MAIN',
+        func: (codeStr) => {
+          try {
+            // eslint-disable-next-line no-new-func
+            (new Function(codeStr))();
+          } catch(e) {
+            console.warn('[MemBrain] inline exec failed:', e.message);
+          }
+        },
+        args: [code],
       });
     }
-    console.debug('[MemBrain] Interceptors injected into tab', tabId);
+    console.log('[MemBrain] Interceptors injected into tab', tabId);
   } catch (e) {
-    console.warn('[MemBrain] Script injection failed:', e.message);
+    console.warn('[MemBrain] Injection failed:', e.message);
   }
 }
 

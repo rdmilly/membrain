@@ -1,3 +1,6 @@
+## v0.6.2 — 2026-03-22
+- fix: inject script content via func arg instead of files, bypasses tab state issues
+
 ## v0.6.1 — 2026-03-22
 - fix: content script triggers SW injection on load, not just tab navigation
 
