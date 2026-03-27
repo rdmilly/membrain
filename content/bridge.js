@@ -126,6 +126,11 @@
         switch (msg.event) {
           case 'injection.ready':
             window.postMessage({ source: PREFIX, type: `${PREFIX}:injection-update`, payload: msg.payload }, '*');
+            // Also send current storage mode so MAIN world context-inject.js knows
+            chrome.storage.session.get('mb_storage_mode').then(r => {
+              const mode = r.mb_storage_mode || 'local';
+              window.postMessage({ source: PREFIX, type: `${PREFIX}:storage-mode`, payload: { mode } }, '*');
+            }).catch(() => {});
             break;
           case 'synapse.ready':
             window.postMessage({ source: PREFIX, type: `${PREFIX}:synapse-toggle`, payload: { enabled: true } }, '*');
@@ -185,41 +190,114 @@
     const CTX_END = '</helix_context>';
     const USER_MSG_SELECTORS = ['[data-testid="user-message"]', '.human-turn', '[class*="user-message"]', '[class*="HumanTurn"]'];
 
+    // Get direct text content of element (excluding children)
+    function ownText(el) {
+      let t = '';
+      for (const node of el.childNodes) {
+        if (node.nodeType === Node.TEXT_NODE) t += node.textContent;
+      }
+      return t;
+    }
+
     function sanitize(container) {
-      const txt = container ? container.textContent : '';
-      if (!txt.includes(SPEC_START) && !txt.includes(CTX_START) && !txt.includes(MB_CTX_START)) return;
       if (!container) return;
-      if (container.querySelector('[data-mbrain-sys]')) return;
-      const allChildren = Array.from(container.querySelectorAll('p, div, li, pre, code, span'));
-      let hiding = false;
-      let hiding2 = false;
-      for (const el of allChildren) {
-        if (el.querySelector('[data-mbrain-sys]')) continue;
-        const t = el.textContent.trim();
-        if (!hiding && t.includes(SPEC_START)) hiding = true;
+      const full = container.textContent || '';
+      if (!full.includes(MB_CTX_START) && !full.includes(SPEC_START) && !full.includes(CTX_START)) return;
+
+      // Use TreeWalker to process text nodes in document order
+      // Track hiding state across the whole container
+      let hiding = false, hiding2 = false, hiding3 = false;
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+      let node;
+      const toHide = new Set();
+
+      while ((node = walker.nextNode())) {
+        const t = node.textContent;
         if (!hiding3 && t.includes(MB_CTX_START)) hiding3 = true;
+        if (!hiding && t.includes(SPEC_START)) hiding = true;
         if (!hiding2 && t.includes(CTX_START)) hiding2 = true;
-        if (hiding || hiding2) { el.style.setProperty('display', 'none', 'important'); el.setAttribute('data-mbrain-sys', '1'); }
-        if (hiding && t.includes(SPEC_END)) { hiding = false; }
-        if (hiding2 && t.includes(CTX_END)) { hiding2 = false; break; }
+
+        if (hiding || hiding2 || hiding3) {
+          // Hide the closest block-level ancestor
+          let el = node.parentElement;
+          while (el && el !== container) {
+            const style = window.getComputedStyle(el);
+            if (style.display === 'block' || style.display === 'flex' || el.tagName === 'P' || el.tagName === 'DIV') {
+              toHide.add(el);
+              break;
+            }
+            el = el.parentElement;
+          }
+          if (!el || el === container) toHide.add(node.parentElement);
+        }
+
+        if (hiding3 && t.includes(MB_CTX_END)) hiding3 = false;
+        if (hiding && t.includes(SPEC_END)) hiding = false;
+        if (hiding2 && t.includes(CTX_END)) hiding2 = false;
+      }
+
+      for (const el of toHide) {
+        if (el && el !== container) {
+          el.style.setProperty('display', 'none', 'important');
+          el.setAttribute('data-mbrain-sys', '1');
+        }
       }
     }
 
+    let _sanitizeTimer = null;
+    let _sanitizeRepeat = null;
+    function scheduleSanitize() {
+      // Run immediately then repeat every 200ms for 3s to beat React reconciliation
+      clearTimeout(_sanitizeTimer);
+      clearInterval(_sanitizeRepeat);
+      let _count = 0;
+      const run = () => {
+        for (const sel of USER_MSG_SELECTORS) {
+          for (const el of document.querySelectorAll(sel)) sanitize(el);
+        }
+      };
+      run();
+      _sanitizeRepeat = setInterval(() => {
+        run();
+        if (++_count >= 15) clearInterval(_sanitizeRepeat);
+      }, 200);
+    }
+    function _scheduleSanitizeOld() {
+      if (_sanitizeTimer) return;
+      _sanitizeTimer = setTimeout(() => {
+        _sanitizeTimer = null;
+        // Scan user message containers
+        for (const sel of USER_MSG_SELECTORS) {
+          for (const el of document.querySelectorAll(sel)) sanitize(el);
+        }
+        // TreeWalker fallback: find text nodes with our markers, walk up to container
+        if (document.body) {
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          let node;
+          while ((node = walker.nextNode())) {
+            const t = node.textContent || '';
+            if (t.includes(MB_CTX_START) || t.includes(SPEC_START)) {
+              let el = node.parentElement;
+              for (let i = 0; i < 8 && el && el !== document.body; i++) {
+                if (el.offsetHeight > 30) { sanitize(el); break; }
+                el = el.parentElement;
+              }
+            }
+          }
+        }
+      }, 150);
+    }
+
     const observer = new MutationObserver((mutations) => {
-      const toSanitize = new Set();
       for (const mutation of mutations) {
         for (const added of mutation.addedNodes) {
-          if (added.nodeType !== Node.ELEMENT_NODE || !added.textContent.includes(SPEC_START) || added.textContent.includes(CTX_START)) continue;
-          let container = null;
-          for (const sel of USER_MSG_SELECTORS) { if (added.matches?.(sel)) { container = added; break; } }
-          if (!container) { let el = added.parentElement; for (let i = 0; i < 10 && el; i++) { for (const sel of USER_MSG_SELECTORS) { if (el.matches?.(sel)) { container = el; break; } } if (container) break; el = el.parentElement; } }
-          if (container) { toSanitize.add(container); } else { let found = false; for (const sel of USER_MSG_SELECTORS) { for (const child of added.querySelectorAll(sel)) { if (child.textContent.includes(SPEC_START) || child.textContent.includes(CTX_START)) { toSanitize.add(child); found = true; } } } if (!found) toSanitize.add(added); }
+          if (added.nodeType !== Node.ELEMENT_NODE) continue;
+          const t = added.textContent || '';
+          if (t.includes(MB_CTX_START) || t.includes(SPEC_START) || t.includes(CTX_START)) {
+            scheduleSanitize();
+            break;
+          }
         }
-      }
-      for (const el of toSanitize) sanitize(el);
-      // Rescan all existing user messages (catches post-response React reconcile)
-      for (const sel of USER_MSG_SELECTORS) {
-        for (const el of document.querySelectorAll(sel)) { sanitize(el); }
       }
     });
 
@@ -241,7 +319,15 @@
     }
   });
 
-  setTimeout(refreshInjectionCache, 2000);
+  // Pre-warm injection cache on page load with empty query
+  // This ensures __memoryExtInjection is populated before first message
+  // Send storage mode to MAIN world on init
+  chrome.storage.session.get('mb_storage_mode').then(r => {
+    const mode = r.mb_storage_mode || 'local';
+    window.postMessage({ source: PREFIX, type: `${PREFIX}:storage-mode`, payload: { mode } }, '*');
+  }).catch(() => {});
+  setTimeout(() => refreshInjectionCache(''), 1500);
+  setTimeout(() => refreshInjectionCache(''), 5000); // second pass after backfill
   setInterval(refreshInjectionCache, 30000);
 
   console.debug('[MemBrain] Bridge v0.5.5 active on', window.location.hostname);

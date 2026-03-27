@@ -24,8 +24,9 @@
 (function () {
   'use strict';
 
-  if (window.__membrainContextInjectInstalled) return;
-  window.__membrainContextInjectInstalled = true;
+  // Re-entrant guard removed: manifest injects at document_start, SW re-injects on
+  // navigation. Both runs needed to ensure hook is in place after SPAs navigate.
+  // The prevFetch chain handles multiple wraps correctly.
 
   // ==================== CONFIG ====================
   const BACKEND_URL = 'https://helix.millyweb.com';
@@ -40,6 +41,11 @@
   const SHARD_CACHE_TTL_MS  = 600_000; // 10 min — refresh shard mid-session
 
   const ENABLED_KEY = 'membrain_context_inject_enabled';
+
+  // Local injection cache (MAIN world) — populated via postMessage from bridge.js
+  // Cannot use window.__memoryExtInjection directly (set in ISOLATED world, invisible here)
+  let _localInjection = { block: '', facts: [], method: 'none', enabled: true };
+  let _storageMode = 'local'; // default until SW broadcasts
 
   const state = {
     enabled: false,
@@ -57,9 +63,12 @@
 
   // ==================== PERSIST STATE ====================
   function loadEnabled() {
+    // Context injection is always enabled by default
+    // Only disabled if user explicitly turns it off
     try {
       const v = sessionStorage.getItem(ENABLED_KEY);
-      state.enabled = v === null ? true : v === 'true';
+      // Default TRUE - only false if explicitly set to 'false'
+      state.enabled = v !== 'false';
     } catch { state.enabled = true; }
   }
 
@@ -205,9 +214,6 @@
   // ==================== INJECT INTO REQUEST BODY ====================
   async function injectContext(bodyText) {
     if (!state.enabled) return null;
-    // Check storage mode - only call Helix in cloud/self-hosted mode
-    const _mode = sessionStorage.getItem('mb_storage_mode') || 'local';
-    if (_mode === 'local') { console.debug('[MemBrain:CI] local mode, skipping Helix inject'); return null; }
 
     let body;
     try { body = JSON.parse(bodyText); } catch { return null; }
@@ -227,19 +233,96 @@
       }
     }
 
-    if (!msgText || msgText.length < 15) return null;
-
-    // Skip if message already has injected context (avoid double-inject)
-    if (msgText.includes('--- HELIX SESSION CONTEXT ---') ||
+    // Block double-injection: if msgText already has injected context, skip
+    if (msgText.includes('[MEMBRAIN CONTEXT]') ||
+        msgText.includes('--- HELIX SESSION CONTEXT ---') ||
         msgText.includes('--- HELIX RELEVANT CONTEXT ---') ||
-        msgText.includes('[MEMBRAIN CONTEXT]')) {
-      return null;
+        msgText.includes('<helix_context>')) return null;
+    // Strip any stale context remnants before processing
+    const cleanMsg = msgText.trim();
+    if (!cleanMsg || cleanMsg.length < 5) return null;
+
+    // Use MAIN-world local var (sessionStorage not reliably readable from MAIN world)
+    const _mode = _storageMode;
+    const convId = getConversationId();
+
+    // ====== LOCAL MODE: inject from IndexedDB via Mirror Index ======
+    if (_mode === 'local') {
+      // Use MAIN-world cache - window.__memoryExtInjection lives in ISOLATED world
+      const injection = _localInjection;
+      const block = injection?.block;
+
+      // Always pre-fetch for NEXT message with current query
+      window.postMessage({
+        source: 'memory-ext',
+        type: 'memory-ext:request-injection',
+        payload: { userMessage: msgText },
+      }, '*');
+
+      if (!block || block.trim() === '') {
+        // No content yet — notify HUD so CI tab shows MemBrain is active
+        try {
+          window.postMessage({
+            source: 'memory-ext',
+            type: 'memory-ext:context-injected',
+            payload: {
+              injections: 0, totalChars: 0, ragChars: 0, shardChars: 0,
+              query: msgText.slice(0, 60), layers: ['local'],
+              factsCount: 0, method: 'warming up…',
+            },
+          }, '*');
+        } catch {}
+        return null;
+      }
+
+      // Inject local block
+      const localBlock = block + '\n\n'; // block already has <helix_context> tags
+      let modified = false;
+
+      if (body.prompt && typeof body.prompt === 'string') {
+        body.prompt = localBlock + body.prompt; modified = true;
+      } else if (Array.isArray(body.messages)) {
+        const lastUser = [...body.messages].reverse().find(m => m.role === 'user');
+        if (lastUser) {
+          if (typeof lastUser.content === 'string') {
+            lastUser.content = localBlock + lastUser.content; modified = true;
+          } else if (Array.isArray(lastUser.content)) {
+            const tb = lastUser.content.find(b => b.type === 'text');
+            if (tb) { tb.text = localBlock + (tb.text || ''); modified = true; }
+          }
+        }
+      }
+
+      if (!modified) return null;
+
+      state.stats.injections++;
+      const factsCount = injection?.facts?.length || 0;
+
+      // Notify HUD
+      try {
+        window.postMessage({
+          source: 'memory-ext',
+          type: 'memory-ext:context-injected',
+          payload: {
+            injections: state.stats.injections,
+            shardChars: 0,
+            ragChars: block.length,
+            totalChars: block.length,
+            convId,
+            query: msgText.slice(0, 60),
+            layers: ['local'],
+            factsCount,
+            method: injection?.method || 'hybrid',
+          },
+        }, '*');
+      } catch {}
+
+      console.debug('[MemBrain:CI] local inject:', factsCount, 'facts,', block.length, 'chars');
+      return JSON.stringify(body);
     }
 
-    const convId = getConversationId();
-    const query  = extractQuery(msgText);
-
-    // Fire both fetches in parallel
+    // ====== CLOUD MODE: inject from Helix shard + RAG ======
+    const query = extractQuery(msgText);
     const [shardText, ragText] = await Promise.all([
       fetchShard(convId),
       fetchRag(query),
@@ -250,17 +333,14 @@
     const block = buildInjectionBlock(shardText, ragText);
     if (!block) return null;
 
-    // Prepend to user message
     let modified = false;
     if (body.prompt && typeof body.prompt === 'string') {
-      body.prompt = block + body.prompt;
-      modified = true;
+      body.prompt = block + body.prompt; modified = true;
     } else if (Array.isArray(body.messages)) {
       const lastUser = [...body.messages].reverse().find(m => m.role === 'user');
       if (lastUser) {
         if (typeof lastUser.content === 'string') {
-          lastUser.content = block + lastUser.content;
-          modified = true;
+          lastUser.content = block + lastUser.content; modified = true;
         } else if (Array.isArray(lastUser.content)) {
           const tb = lastUser.content.find(b => b.type === 'text');
           if (tb) { tb.text = block + (tb.text || ''); modified = true; }
@@ -272,19 +352,18 @@
 
     state.stats.injections++;
 
-    // Notify HUD
     try {
       window.postMessage({
         source: 'memory-ext',
         type: 'memory-ext:context-injected',
         payload: {
-          injections:  state.stats.injections,
-          shardChars:  shardText?.length || 0,
-          ragChars:    ragText?.length || 0,
-          totalChars:  (shardText?.length || 0) + (ragText?.length || 0),
-          convId:      convId,
-          query:       query.slice(0, 60),
-          layers:      [shardText ? 'shard' : null, ragText ? 'rag' : null].filter(Boolean),
+          injections: state.stats.injections,
+          shardChars: shardText?.length || 0,
+          ragChars: ragText?.length || 0,
+          totalChars: (shardText?.length || 0) + (ragText?.length || 0),
+          convId,
+          query: query.slice(0, 60),
+          layers: [shardText ? 'shard' : null, ragText ? 'rag' : null].filter(Boolean),
         },
       }, '*');
     } catch {}
@@ -292,11 +371,17 @@
     return JSON.stringify(body);
   }
 
+
   // ==================== FETCH HOOK ====================
   function installFetchHook() {
     const prevFetch = window.fetch;
 
     window.fetch = async function (input, init) {
+      const _url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input));
+      const _isAI = _url.includes('completion') || _url.includes('conversation') || _url.includes('claude.ai') || _url.includes('chatgpt');
+      if (_isAI) {
+        console.debug('[MemBrain:CI] fetch:', _url.slice(0,100), '| enabled:', state.enabled, '| body:', typeof init?.body, init?.body?.length);
+      }
       if (!state.enabled || !init?.body || typeof init.body !== 'string') {
         return prevFetch.apply(this, arguments);
       }
@@ -304,11 +389,12 @@
       const url = typeof input === 'string' ? input
         : (input instanceof Request ? input.url : String(input));
 
-      const isClaudeChat = /claude\.ai.*\/completion/.test(url);
+      const isClaudeChat = url.includes('/completion') || url.includes('claude.ai');
       const isChatGPT   = /chatgpt\.com.*\/conversation/.test(url) ||
                           /chat\.openai\.com.*\/conversation/.test(url);
 
       if (isClaudeChat || isChatGPT) {
+        console.debug('[MemBrain:CI] fetch hook fired, url:', url.slice(0,60), 'mode:', sessionStorage.getItem('mb_storage_mode'));
         try {
           const modified = await injectContext(init.body);
           if (modified) {
@@ -329,7 +415,28 @@
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
     const msg = event.data;
-    if (msg?.source === 'memory-ext' && msg?.type === 'memory-ext:context-inject-toggle') {
+    if (!msg?.source || msg.source !== 'memory-ext') return;
+
+    // Receive injection block from bridge.js (ISOLATED world → MAIN world via postMessage)
+    if (msg.type === 'memory-ext:injection-update') {
+      const p = msg.payload || {};
+      _localInjection = {
+        block: p.block || '',
+        facts: p.facts || [],
+        method: p.method || 'keyword',
+        enabled: p.enabled !== false,
+        count: p.count || 0,
+      };
+      console.debug('[MemBrain:CI] injection cache updated:', _localInjection.block.length, 'chars,', _localInjection.facts.length, 'facts');
+    }
+
+    // Receive storage mode from bridge.js
+    if (msg.type === 'memory-ext:storage-mode') {
+      _storageMode = msg.payload?.mode || 'local';
+      console.debug('[MemBrain:CI] storage mode:', _storageMode);
+    }
+
+    if (msg.type === 'memory-ext:context-inject-toggle') {
       state.enabled = !!msg.payload?.enabled;
       saveEnabled();
       console.debug('[MemBrain] Context inject', state.enabled ? 'ENABLED' : 'DISABLED');

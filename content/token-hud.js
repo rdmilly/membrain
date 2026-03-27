@@ -586,6 +586,28 @@
       if (intel.stream.length > 50) intel.stream.shift();
       if (state.activeTab === 'intelligence') render();
     }
+    if (t === `${PREFIX}:injection-applied`) {
+      // Fired by interceptor.js when __memoryExtInjection block is actually injected
+      const p = event.data.payload || {};
+      const charCount = Math.ceil((p.tokenEstimate || 0) * 4);
+      intel.totalInjected += charCount;
+      intel.stream.push({
+        type: 'inject',
+        chars: charCount,
+        shardChars: 0,
+        ragChars: charCount,
+        ciChars: 0,
+        query: '',
+        layers: ['local'],
+        factsCount: p.factCount || 0,
+        method: 'mirror-index',
+        ts: Date.now(),
+      });
+      if (intel.stream.length > 50) intel.stream.shift();
+      state.capturing = true;
+      if (state.activeTab === 'intelligence') render();
+      else render();
+    }
     if (t === `${PREFIX}:symbol-promoted`) {
       // Fired when phrase_promoter promotes a new § symbol
       const { symbol, phrase } = event.data.payload || {};

@@ -207,12 +207,11 @@
 
     switch (platform) {
       case 'claude': {
-        // Claude: body.prompt is the user message
+        // Prepend to user message
         if (body.prompt && typeof body.prompt === 'string') {
           body.prompt = block + '\n\n' + body.prompt;
           return true;
         }
-        // Alternative: body.messages array
         if (Array.isArray(body.messages)) {
           const lastUser = [...body.messages].reverse().find(m => m.role === 'user');
           if (lastUser) {
@@ -221,10 +220,7 @@
               return true;
             } else if (Array.isArray(lastUser.content)) {
               const textBlock = lastUser.content.find(b => b.type === 'text');
-              if (textBlock) {
-                textBlock.text = block + '\n\n' + textBlock.text;
-                return true;
-              }
+              if (textBlock) { textBlock.text = block + '\n\n' + textBlock.text; return true; }
             }
           }
         }

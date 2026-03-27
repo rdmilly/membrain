@@ -19,6 +19,7 @@
  */
 
 import { ConversationParser } from '../lib/conversation-parser.js';
+import { mirrorIndex as _mirrorIndexSingleton } from '../lib/mirror-index.js';
 import { memoryStorage } from '../lib/storage.js';
 import { FactExtractor } from '../lib/fact-extractor.js';
 import { MemoryInjector } from '../lib/memory-injector.js';
@@ -29,15 +30,15 @@ import {
   isBusEvent,
 } from '../lib/event-bus.js';
 // Mirror Index: dual BM25 + vector search for local RAG
+// Statically imported above to avoid dynamic import() restriction in SW
 let _mirrorIndex = null;
 async function getMirrorIndex() {
   if (!_mirrorIndex) {
     try {
-      const { mirrorIndex } = await import('../lib/mirror-index.js');
-      await mirrorIndex.init();
-      _mirrorIndex = mirrorIndex;
+      await _mirrorIndexSingleton.init();
+      _mirrorIndex = _mirrorIndexSingleton;
     } catch (e) {
-      console.warn('[MemBrain] MirrorIndex unavailable:', e.message);
+      console.warn('[MemBrain] MirrorIndex init failed:', e.message);
     }
   }
   return _mirrorIndex;
@@ -102,6 +103,8 @@ async function initialize() {
     console.debug('[MemBrain] Storage mode:', currentMode);
     inputBus.emit(EVENTS.SW_READY, { version: CONFIG.EXTENSION_VERSION, storageMode: currentMode });
     console.debug(`[MemBrain] SW v${CONFIG.EXTENSION_VERSION} ready`);
+    // Clean dirty Mirror Index entries first, then backfill
+    setTimeout(() => cleanMirrorIndex().then(() => backfillMirrorIndex()).catch(() => {}), 3000);
   } catch (e) {
     console.error('[MemBrain] Init failed:', e);
     inputBus.emit(EVENTS.PIPELINE_ERROR, { phase: 'init', error: e.message });
@@ -161,9 +164,17 @@ inputBus.on(EVENTS.TURN_CAPTURED, async (turn) => {
     // Index into Mirror Index for local BM25 + vector search
     getMirrorIndex().then(idx => {
       if (idx && turn.content) {
+        // Strip injected context blocks before indexing to prevent recursive nesting
+        const cleanContent = turn.content
+          .replace(/\[MEMBRAIN CONTEXT\][\s\S]*?\[END MEMBRAIN CONTEXT\]\n*/g, '')
+          .replace(/<memory_context>[\s\S]*?<\/memory_context>\n*/g, '')
+          .replace(/--- HELIX SESSION CONTEXT ---[\s\S]*?--- END SESSION CONTEXT ---\n*/g, '')
+          .replace(/--- HELIX RELEVANT CONTEXT ---[\s\S]*?--- END RELEVANT CONTEXT ---\n*/g, '')
+          .trim();
+        if (!cleanContent || cleanContent.length < 5) return;
         idx.add({
           id: turn.id || `${turn.conversationId}-${Date.now()}`,
-          text: turn.content,
+          text: cleanContent,
           role: turn.role,
           platform: turn.platform,
           conversationId: turn.conversationId,
@@ -712,11 +723,16 @@ async function getInjectionForPage(data) {
 
     // ── LAYER 1: Mirror Index (BM25 + vector hybrid) ──────────────────────
     // Searches full conversation history in real-time, no extraction needed
-    if (userMessage.trim().length > 5) {
+    // Empty query = return most recent turns (for pre-warm)
+    if (userMessage.trim().length >= 0) {
       try {
         const idx = await getMirrorIndex();
         if (idx) {
-          const results = await idx.search(userMessage, { topK: 6 });
+          // Empty query = get recent turns for pre-warm
+          const results = userMessage.trim().length > 5
+            ? await idx.search(userMessage, { topK: 6 })
+            : await idx.getRecent(6);
+          console.debug('[MemBrain] Mirror Index search:', JSON.stringify({query: userMessage.slice(0,40), results: results.length, stats: idx.getStats()}));
           if (results.length > 0) {
             const now = Date.now();
             const lines = results.map(r => {
@@ -725,7 +741,7 @@ async function getInjectionForPage(data) {
               const ago = mins < 60 ? `${mins}m ago` : mins < 1440 ? `${Math.round(mins/60)}h ago` : `${Math.round(mins/1440)}d ago`;
               return `[${role} · ${ago}]: ${r.text.slice(0, 300)}`;
             });
-            const block = `<memory_context>\nRelated from your history:\n${lines.join('\n')}\n</memory_context>`;
+            const block = `<helix_context>\nRelated from your history:\n${lines.join('\n')}\n</helix_context>`;
             return {
               enabled: true,
               block,
@@ -747,9 +763,6 @@ async function getInjectionForPage(data) {
     }
 
     // ── LAYER 2: Extracted facts fallback ─────────────────────────────────
-    await injector.configure();
-    if (!injector.isEnabled()) return { enabled: false, block: '', facts: [] };
-
     const facts = await memoryStorage.getFacts();
     if (!facts.length) return { enabled: true, block: '', facts: [], method: 'none', source: 'local' };
 
@@ -760,7 +773,7 @@ async function getInjectionForPage(data) {
       })
       .slice(0, 8);
 
-    const block = `<memory_context>\n${selectedFacts.map(f => `- ${f.content} (${f.confidence || 'medium'})`).join('\n')}\n</memory_context>`;
+    const block = `<helix_context>\n${selectedFacts.map(f => `- ${f.content} (${f.confidence || 'medium'})`).join('\n')}\n</helix_context>`;
 
     return {
       enabled: true,
@@ -1027,3 +1040,60 @@ async function broadcastStorageMode() {
 
 // Broadcast on startup and whenever mode changes
 broadcastStorageMode().catch(() => {});
+
+// ==================== MIRROR INDEX BACKFILL ====================
+// On startup, index existing conversation turns into Mirror Index.
+// Runs once per SW lifecycle, 3s after init so it doesn't slow startup.
+async function backfillMirrorIndex() {
+  try {
+    const idx = await getMirrorIndex();
+    if (!idx) return;
+
+    const stats = idx.getStats();
+    console.debug('[MemBrain] Mirror Index stats before backfill:', JSON.stringify(stats));
+    // Only skip if we have substantial content already
+    if (stats.bm25Docs > 200) {
+      console.debug('[MemBrain] Mirror Index already populated:', stats.bm25Docs, 'docs');
+      return;
+    }
+
+    console.debug('[MemBrain] Backfilling Mirror Index from conversation history...');
+    const conversations = await memoryStorage.getConversations({ limit: 50 });
+    let count = 0;
+
+    for (const conv of conversations) {
+      if (!conv.turns) continue;
+      for (const turn of conv.turns) {
+        if (!turn.content || turn.content.length < 10) continue;
+        await idx.add({
+          id: `${conv.id}-${turn.index || count}`,
+          text: turn.content,
+          role: turn.role,
+          platform: conv.platform || 'claude',
+          conversationId: conv.id,
+          ts: turn.timestamp || conv.updatedAt || Date.now(),
+        });
+        count++;
+        // Yield every 20 to avoid blocking SW
+        if (count % 20 === 0) await new Promise(r => setTimeout(r, 50));
+      }
+    }
+
+    console.debug(`[MemBrain] Mirror Index backfill complete: ${count} turns indexed`);
+  } catch (e) {
+    console.warn('[MemBrain] Backfill failed:', e.message);
+  }
+}
+
+// ==================== MIRROR INDEX CLEANUP ====================
+async function cleanMirrorIndex() {
+  try {
+    const idx = await getMirrorIndex();
+    if (!idx) return;
+    await idx.purgeContaining('[MEMBRAIN CONTEXT]');
+    await idx.purgeContaining('<helix_context>');
+    console.debug('[MemBrain] Mirror Index cleanup complete');
+  } catch (e) {
+    console.warn('[MemBrain] Cleanup failed:', e.message);
+  }
+}
