@@ -101,10 +101,11 @@
         }
       );
 
-      if (!resp.ok) return null;
+      if (!resp.ok) { console.debug("[MemBrain:CI] shard fail", resp.status); return null; }
       const data = await resp.json();
       const text = data?.injection_text;
 
+      console.debug("[MemBrain:CI] shard chars:", text?.length || 0);
       if (!text || text.trim() === '') return null;
 
       // Cache it
@@ -204,6 +205,9 @@
   // ==================== INJECT INTO REQUEST BODY ====================
   async function injectContext(bodyText) {
     if (!state.enabled) return null;
+    // Check storage mode - only call Helix in cloud/self-hosted mode
+    const _mode = sessionStorage.getItem('mb_storage_mode') || 'local';
+    if (_mode === 'local') { console.debug('[MemBrain:CI] local mode, skipping Helix inject'); return null; }
 
     let body;
     try { body = JSON.parse(bodyText); } catch { return null; }

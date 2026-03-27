@@ -347,9 +347,17 @@
       <label>Backend URL</label>
       <input type="text" id="backendUrl" placeholder="https://helix.millyweb.com" />
     </div>
+    <div class="field">
+      <label>API Key</label>
+      <input type="password" id="backendApiKey" placeholder="ce-prod-xxxx" />
+    </div>
+    <div class="btn-row" style="margin-top:8px;">
+      <button class="btn" id="connectBackendBtn" style="background:#6d28d9;">Connect Backend</button>
+      <button class="btn btn-secondary" id="disconnectBackendBtn">Disconnect</button>
+    </div>
     <div class="checkbox-row" style="margin-top:8px;">
       <input type="checkbox" id="syncEnabled" checked />
-      <span>Auto-sync conversations every 2 minutes</span>
+      <span>Auto-sync conversations to backend</span>
     </div>
     <div class="btn-row">
       <button class="btn btn-secondary" id="flushNowBtn">↑ Sync Now</button>

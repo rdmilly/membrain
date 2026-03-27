@@ -375,23 +375,22 @@
     }
 
     const result = reassembler.finish();
-    if (result && result.content) {
+    if (result) {
       emit(MSG_TYPES.STREAM_COMPLETE, {
         ...result,
         url: typeof response.url === 'string' ? response.url : '',
         role: 'assistant',
         usage: reassembler._usage,
       });
-      // Emit dedicated token-usage event for the HUD
-      if (reassembler._usage.input_tokens || reassembler._usage.output_tokens) {
-        emit(`${PREFIX}:token-usage`, {
-          input_tokens: reassembler._usage.input_tokens,
-          output_tokens: reassembler._usage.output_tokens,
-          conversationId: result.conversationId,
-          platform: result.platform,
-          timestamp: Date.now(),
-        });
-      }
+      // Always emit token-usage — even if content is empty (tool use, etc)
+      console.debug('[MemBrain] token-usage emit:', reassembler._usage, 'content len:', result.content?.length);
+      emit(`${PREFIX}:token-usage`, {
+        input_tokens: reassembler._usage.input_tokens || 0,
+        output_tokens: reassembler._usage.output_tokens || 0,
+        conversationId: result.conversationId,
+        platform: result.platform,
+        timestamp: Date.now(),
+      });
     }
   }
 

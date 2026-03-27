@@ -82,7 +82,10 @@ async function initialize() {
       pendingTurns = [];
     }
 
-    inputBus.emit(EVENTS.SW_READY, { version: CONFIG.EXTENSION_VERSION });
+    const currentMode = await memoryStorage.getSetting('storageMode', 'local');
+    await chrome.storage.session.set({ mb_storage_mode: currentMode });
+    console.debug('[MemBrain] Storage mode:', currentMode);
+    inputBus.emit(EVENTS.SW_READY, { version: CONFIG.EXTENSION_VERSION, storageMode: currentMode });
     console.debug(`[MemBrain] SW v${CONFIG.EXTENSION_VERSION} ready`);
   } catch (e) {
     console.error('[MemBrain] Init failed:', e);
@@ -98,14 +101,19 @@ initialize();
 /**
  * TURN_CAPTURED → parse + persist conversation
  */
-// Auto-flush to backend after each turn is captured (real-time capture)
-// Debounced 1s so rapid multi-turn captures batch together
+// Auto-flush to backend after each turn is captured
+// Only fires in cloud/self-hosted mode. Local mode keeps data in IndexedDB only.
 let _flushTimer = null;
 inputBus.on(EVENTS.TURN_CAPTURED, () => {
   clearTimeout(_flushTimer);
-  _flushTimer = setTimeout(() => {
-    console.debug('[MemBrain] Auto-flushing after turn capture');
-    inputBus.emit(EVENTS.FLUSH_REQUESTED, { source: 'auto' });
+  _flushTimer = setTimeout(async () => {
+    const mode = await memoryStorage.getSetting('storageMode', 'local');
+    if (mode !== 'local') {
+      console.debug('[MemBrain] Auto-flushing after turn capture (mode:', mode, ')');
+      inputBus.emit(EVENTS.FLUSH_REQUESTED, { source: 'auto' });
+    } else {
+      console.debug('[MemBrain] Local mode - turn saved to IndexedDB, not flushed to backend');
+    }
   }, 1000);
 });
 
@@ -201,7 +209,12 @@ inputBus.on(EVENTS.FACTS_EXTRACTED, async ({ facts, conversationId }) => {
 /**
  * FLUSH_REQUESTED → flush to backend → emit FLUSH_COMPLETE or FLUSH_ERROR
  */
-inputBus.on(EVENTS.FLUSH_REQUESTED, async () => {
+inputBus.on(EVENTS.FLUSH_REQUESTED, async (opts) => {
+  const mode = await memoryStorage.getSetting('storageMode', 'local');
+  if (mode === 'local' && opts?.source !== 'manual') {
+    console.debug('[MemBrain] Flush skipped - local mode');
+    return;
+  }
   const result = await flushToBackend();
   console.log('[MemBrain] Flush result:', JSON.stringify(result));
   if (result.status === 'error') {
@@ -767,12 +780,14 @@ async function getAllSettingsForOptions() {
 
 async function saveSettingsFromOptions(data) {
   try {
-    const allowed = ['maxFactsToInject', 'tokenBudget', 'vectorThreshold', 'backendUrl', 'syncEnabled'];
+    const allowed = ['maxFactsToInject', 'tokenBudget', 'vectorThreshold', 'backendUrl', 'syncEnabled', 'storageMode'];
     for (const key of allowed) {
       if (data[key] !== undefined) {
         await memoryStorage.setSetting(key, data[key]);
       }
     }
+    // Broadcast mode change to content scripts
+    await broadcastStorageMode().catch(() => {});
     return { saved: true };
   } catch (e) {
     return { saved: false, error: e.message };
@@ -958,3 +973,17 @@ chrome.tabs.query({}).then(tabs => {
     if (tab.id && tab.url) injectInterceptors(tab.id, tab.url);
   });
 }).catch(() => {});
+
+// Broadcast storage mode to all eligible tabs so content scripts can read it
+async function broadcastStorageMode() {
+  const mode = await memoryStorage.getSetting('storageMode', 'local');
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) {
+    if (tab.id && shouldInject(tab.url || '')) {
+      chrome.tabs.sendMessage(tab.id, { action: 'storage-mode', mode }).catch(() => {});
+    }
+  }
+}
+
+// Broadcast on startup and whenever mode changes
+broadcastStorageMode().catch(() => {});

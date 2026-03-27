@@ -285,6 +285,47 @@ document.getElementById('flushNowBtn').addEventListener('click', async () => {
   }
 });
 
+// ==================== CONNECT BACKEND (Self-Hosted) ====================
+// Simple connect: saves backend URL + API key, switches to cloud mode
+// No vector migration needed for self-hosted tier
+document.getElementById('connectBackendBtn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('connectBackendBtn');
+  const backendUrl = document.getElementById('backendUrl')?.value?.trim();
+  const apiKey = document.getElementById('backendApiKey')?.value?.trim();
+
+  if (!backendUrl) { toast('Enter a backend URL first', 'error'); return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Connecting…';
+
+  // Test the connection
+  try {
+    const resp = await fetch(`${backendUrl}/api/v1/ext/ingest`, {
+      method: 'OPTIONS',
+      headers: apiKey ? { 'X-API-Key': apiKey } : {},
+    }).catch(() => null);
+
+    // Save settings and switch to cloud mode
+    await send('save-settings', { storageMode: 'cloud', backendUrl, syncEnabled: true });
+    if (apiKey) await send('configure-api', { apiKey, apiProvider: 'helix' });
+
+    btn.textContent = '✅ Connected';
+    toast('Connected to backend — conversations will now sync automatically', 'success', 4000);
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Connect'; loadAll(); }, 2000);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Connect';
+    toast('Connection failed: ' + e.message, 'error');
+  }
+});
+
+document.getElementById('disconnectBackendBtn')?.addEventListener('click', async () => {
+  if (!confirm('Disconnect backend? Conversations will stay local only.')) return;
+  await send('save-settings', { storageMode: 'local' });
+  toast('Disconnected — now in local-only mode');
+  loadAll();
+});
+
 // ==================== MIGRATE / UPGRADE ====================
 
 document.getElementById('migrateBtn').addEventListener('click', async () => {
@@ -310,6 +351,10 @@ document.getElementById('migrateBtn').addEventListener('click', async () => {
 
   // Send tier upgrade event to SW — it handles migration via VectorBackendFactory.migrate()
   const result = await send('tier-upgrade', { token, clearLocal });
+  // Switch to cloud mode on success
+  if (result?.success !== false) {
+    await send('save-settings', { storageMode: 'cloud', backendUrl: document.getElementById('backendUrl')?.value || '' });
+  }
 
   progressFill.style.width = '100%';
 
@@ -334,6 +379,7 @@ document.getElementById('downgradeLink').addEventListener('click', async (e) => 
   e.preventDefault();
   if (!confirm('Switch back to local embeddings? Your cloud data is preserved.')) return;
   await send('tier-downgrade');
+  await send('save-settings', { storageMode: 'local' });
   toast('Switched to local tier');
   loadAll();
 });
