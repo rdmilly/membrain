@@ -98,6 +98,17 @@ initialize();
 /**
  * TURN_CAPTURED → parse + persist conversation
  */
+// Auto-flush to backend after each turn is captured (real-time capture)
+// Debounced 1s so rapid multi-turn captures batch together
+let _flushTimer = null;
+inputBus.on(EVENTS.TURN_CAPTURED, () => {
+  clearTimeout(_flushTimer);
+  _flushTimer = setTimeout(() => {
+    console.debug('[MemBrain] Auto-flushing after turn capture');
+    inputBus.emit(EVENTS.FLUSH_REQUESTED, { source: 'auto' });
+  }, 1000);
+});
+
 inputBus.on(EVENTS.TURN_CAPTURED, async (turn) => {
   try {
     const result = parser.ingestTurns([turn]);
@@ -192,6 +203,7 @@ inputBus.on(EVENTS.FACTS_EXTRACTED, async ({ facts, conversationId }) => {
  */
 inputBus.on(EVENTS.FLUSH_REQUESTED, async () => {
   const result = await flushToBackend();
+  console.log('[MemBrain] Flush result:', JSON.stringify(result));
   if (result.status === 'error') {
     outputBus.emit(EVENTS.FLUSH_ERROR, result);
   } else {
@@ -894,8 +906,9 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 console.debug(`[MemBrain] Service worker v${CONFIG.EXTENSION_VERSION} started`);
 
 // ==================== MAIN WORLD SCRIPT INJECTION ====================
-// Inject interceptor scripts into MAIN world to bypass page CSP
-// This is the only reliable MV3 approach for strict-CSP pages like claude.ai
+// Manifest content_scripts with world:MAIN handles injection declaratively.
+// Imperative injection removed — new Function() eval is blocked by claude.ai CSP.
+// The onUpdated listener below re-injects on navigation for tabs opened before the SW started.
 
 const INJECT_SCRIPTS = [
   'interceptor/interceptor.js',
@@ -921,25 +934,11 @@ function shouldInject(url) {
 async function injectInterceptors(tabId, url) {
   if (!shouldInject(url)) return;
   try {
-    // Use func injection (most reliable - no file path issues, works on any load state)
-    for (const file of INJECT_SCRIPTS) {
-      const fileUrl = chrome.runtime.getURL(file);
-      const resp = await fetch(fileUrl);
-      const code = await resp.text();
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        world: 'MAIN',
-        func: (codeStr) => {
-          try {
-            // eslint-disable-next-line no-new-func
-            (new Function(codeStr))();
-          } catch(e) {
-            console.warn('[MemBrain] inline exec failed:', e.message);
-          }
-        },
-        args: [code],
-      });
-    }
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      files: INJECT_SCRIPTS,
+    });
     console.log('[MemBrain] Interceptors injected into tab', tabId);
   } catch (e) {
     console.warn('[MemBrain] Injection failed:', e.message);

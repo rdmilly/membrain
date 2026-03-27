@@ -46,6 +46,7 @@
       if (!event.data || event.data.source !== PREFIX) return;
 
       const { type, payload } = event.data;
+      console.debug('[MemBrain:bridge] received message:', type);
 
       // Tier 1 async relay â€" needs round-trip response
       if (type === `${PREFIX}:tier1-request`) {
@@ -223,8 +224,7 @@
     document.body ? start() : document.addEventListener('DOMContentLoaded', start);
   }
 
-  // Tell SW to inject interceptors into this tab (MAIN world, bypasses CSP)
-  chrome.runtime.sendMessage({ action: 'inject-now' }).catch(() => {});
+  injectAll();
   setupInputRelay();
   setupOutputRelay();
   setupBubbleSanitizer();
