@@ -977,9 +977,10 @@ chrome.tabs.query({}).then(tabs => {
 // Broadcast storage mode to all eligible tabs so content scripts can read it
 async function broadcastStorageMode() {
   const mode = await memoryStorage.getSetting('storageMode', 'local');
+  await chrome.storage.session.set({ mb_storage_mode: mode });
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) {
-    if (tab.id && shouldInject(tab.url || '')) {
+    if (tab.id && tab.url && shouldInject(tab.url)) {
       chrome.tabs.sendMessage(tab.id, { action: 'storage-mode', mode }).catch(() => {});
     }
   }

@@ -167,9 +167,9 @@
     });
   }
 
-  async function refreshInjectionCache() {
+  async function refreshInjectionCache(userMessage) {
     try {
-      const response = await chrome.runtime.sendMessage({ action: 'get-injection' });
+      const response = await chrome.runtime.sendMessage({ action: 'get-injection', data: { userMessage: userMessage || '' } });
       if (response) {
         window.postMessage({ source: PREFIX, type: `${PREFIX}:injection-update`, payload: response }, '*');
       }
@@ -178,6 +178,8 @@
 
   function setupBubbleSanitizer() {
     const SPEC_START = '--- CMPRS ---';
+    const MB_CTX_START = '[MEMBRAIN CONTEXT]';
+    const MB_CTX_END = '[END MEMBRAIN CONTEXT]';
     const SPEC_END = '--- END ---';
     const CTX_START = '<helix_context>';
     const CTX_END = '</helix_context>';
@@ -185,7 +187,7 @@
 
     function sanitize(container) {
       const txt = container ? container.textContent : '';
-      if (!txt.includes(SPEC_START) && !txt.includes(CTX_START)) return;
+      if (!txt.includes(SPEC_START) && !txt.includes(CTX_START) && !txt.includes(MB_CTX_START)) return;
       if (!container) return;
       if (container.querySelector('[data-mbrain-sys]')) return;
       const allChildren = Array.from(container.querySelectorAll('p, div, li, pre, code, span'));
@@ -195,6 +197,7 @@
         if (el.querySelector('[data-mbrain-sys]')) continue;
         const t = el.textContent.trim();
         if (!hiding && t.includes(SPEC_START)) hiding = true;
+        if (!hiding3 && t.includes(MB_CTX_START)) hiding3 = true;
         if (!hiding2 && t.includes(CTX_START)) hiding2 = true;
         if (hiding || hiding2) { el.style.setProperty('display', 'none', 'important'); el.setAttribute('data-mbrain-sys', '1'); }
         if (hiding && t.includes(SPEC_END)) { hiding = false; }
@@ -228,6 +231,16 @@
   setupInputRelay();
   setupOutputRelay();
   setupBubbleSanitizer();
+  // Listen for injection refresh requests from context-inject.js (MAIN world)
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    if (event.data?.source !== PREFIX) return;
+    if (event.data?.type === PREFIX + ':request-injection') {
+      const userMessage = event.data?.payload?.userMessage || '';
+      refreshInjectionCache(userMessage);
+    }
+  });
+
   setTimeout(refreshInjectionCache, 2000);
   setInterval(refreshInjectionCache, 30000);
 

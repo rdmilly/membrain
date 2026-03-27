@@ -231,7 +231,8 @@
 
     // Skip if message already has injected context (avoid double-inject)
     if (msgText.includes('--- HELIX SESSION CONTEXT ---') ||
-        msgText.includes('--- HELIX RELEVANT CONTEXT ---')) {
+        msgText.includes('--- HELIX RELEVANT CONTEXT ---') ||
+        msgText.includes('[MEMBRAIN CONTEXT]')) {
       return null;
     }
 

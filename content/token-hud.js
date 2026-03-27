@@ -237,6 +237,7 @@
       .mb-intel-layer.shard { background: rgba(96,165,250,0.15); color: #60a5fa; }
       .mb-intel-layer.rag   { background: rgba(240,160,112,0.15); color: #f0a070; }
       .mb-intel-layer.ci    { background: rgba(167,139,250,0.15); color: #a78bfa; }
+      .mb-intel-layer.local { background: rgba(74,222,128,0.15); color: #4ade80; }
       .mb-sym-row { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; padding: 7px 9px; background: rgba(250,204,21,0.04); border: 1px solid rgba(250,204,21,0.12); border-radius: 7px; min-height: 32px; align-items: center; }
       .mb-sym { font-family: monospace; font-size: 12px; color: #facc15; background: rgba(250,204,21,0.1); padding: 1px 5px; border-radius: 4px; animation: mb-popin 0.3s cubic-bezier(0.34,1.56,0.64,1); }
       .mb-sym.new { color: #fde68a; box-shadow: 0 0 6px rgba(250,204,21,0.4); }
@@ -332,8 +333,9 @@
                 <span class="mb-intel-time">${timeAgoShort(ev.ts)}</span>
               </div>
               <div class="mb-intel-detail">
-                <span class="hi">${fmt(ev.chars)}c</span> injected
-                ${ev.query ? ' · <span style="color:#64748b">' + esc(ev.query.slice(0,45)) + '</span>' : ''}
+                <span class="hi">${fmt(ev.chars)}c</span> injected${ev.factsCount ? ' <span style="color:#4ade80">· ' + ev.factsCount + ' facts</span>' : ''}
+                ${ev.method ? ' <span style="color:#64748b">[' + ev.method + ']</span>' : ''}
+                ${ev.query ? ' · <span style="color:#64748b">' + esc(ev.query.slice(0,40)) + '</span>' : ''}
               </div>
               <div class="mb-intel-layers">${layersHTML}${ciHTML}</div>
               <div class="mb-bar-wrap"><div class="mb-bar-fill" style="width:${Math.min(100, Math.round(ev.chars/50))}%"></div></div>
@@ -577,6 +579,8 @@
         ciChars: p.ciChars || 0,
         query: p.query || '',
         layers: p.layers || [],
+        factsCount: p.factsCount || 0,
+        method: p.method || '',
         ts: Date.now(),
       });
       if (intel.stream.length > 50) intel.stream.shift();
