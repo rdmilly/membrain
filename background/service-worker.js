@@ -28,6 +28,21 @@ import {
   EVENTS,
   isBusEvent,
 } from '../lib/event-bus.js';
+// Mirror Index: dual BM25 + vector search for local RAG
+let _mirrorIndex = null;
+async function getMirrorIndex() {
+  if (!_mirrorIndex) {
+    try {
+      const { mirrorIndex } = await import('../lib/mirror-index.js');
+      await mirrorIndex.init();
+      _mirrorIndex = mirrorIndex;
+    } catch (e) {
+      console.warn('[MemBrain] MirrorIndex unavailable:', e.message);
+    }
+  }
+  return _mirrorIndex;
+}
+
 // Vector backend: lazy-loaded to avoid SW parse errors with transformers.min.js
 let _vectorBackendModule = null;
 async function getVectorBackend() {
@@ -142,6 +157,20 @@ inputBus.on(EVENTS.TURN_CAPTURED, async (turn) => {
 
     await incrementStat('totalTurns');
     await incrementStat(`turns_${turn.platform}`);
+
+    // Index into Mirror Index for local BM25 + vector search
+    getMirrorIndex().then(idx => {
+      if (idx && turn.content) {
+        idx.add({
+          id: turn.id || `${turn.conversationId}-${Date.now()}`,
+          text: turn.content,
+          role: turn.role,
+          platform: turn.platform,
+          conversationId: turn.conversationId,
+          ts: turn.timestamp || Date.now(),
+        }).catch(() => {});
+      }
+    }).catch(() => {});
 
     // Update badge
     const stats = await memoryStorage.getConversationStats();
@@ -679,62 +708,72 @@ async function extractFacts(options = {}) {
 
 async function getInjectionForPage(data) {
   try {
+    const userMessage = data?.userMessage || '';
+
+    // ── LAYER 1: Mirror Index (BM25 + vector hybrid) ──────────────────────
+    // Searches full conversation history in real-time, no extraction needed
+    if (userMessage.trim().length > 5) {
+      try {
+        const idx = await getMirrorIndex();
+        if (idx) {
+          const results = await idx.search(userMessage, { topK: 6 });
+          if (results.length > 0) {
+            const now = Date.now();
+            const lines = results.map(r => {
+              const role = r.role === 'user' ? 'You' : 'Claude';
+              const mins = r.ts ? Math.round((now - r.ts) / 60000) : 0;
+              const ago = mins < 60 ? `${mins}m ago` : mins < 1440 ? `${Math.round(mins/60)}h ago` : `${Math.round(mins/1440)}d ago`;
+              return `[${role} · ${ago}]: ${r.text.slice(0, 300)}`;
+            });
+            const block = `<memory_context>\nRelated from your history:\n${lines.join('\n')}\n</memory_context>`;
+            return {
+              enabled: true,
+              block,
+              facts: results.map(r => ({
+                content: r.text.slice(0, 150),
+                category: 'conversation',
+                confidence: 'high',
+                score: r.score,
+              })),
+              method: results[0]?.method || 'hybrid',
+              source: 'local',
+              count: results.length,
+            };
+          }
+        }
+      } catch (e) {
+        console.warn('[MemBrain] MirrorIndex search failed:', e.message);
+      }
+    }
+
+    // ── LAYER 2: Extracted facts fallback ─────────────────────────────────
     await injector.configure();
     if (!injector.isEnabled()) return { enabled: false, block: '', facts: [] };
 
     const facts = await memoryStorage.getFacts();
-    if (!facts.length) return { enabled: true, block: '', facts: [] };
+    if (!facts.length) return { enabled: true, block: '', facts: [], method: 'none', source: 'local' };
 
-    let selectedFacts = [];
-
-    // ── Semantic search (if vector backend is ready) ──────────────────────────
-    // Use the outgoing message as the query for relevance-ranked injection.
-    const userMessage = data?.userMessage || ''; // passed from interceptor when available
-    if (userMessage.trim().length > 5) {
-      try {
-        const backend = await getVectorBackend();
-        const vectorResults = await backend.search(userMessage, { topK: 8, threshold: 0.3 });
-
-        if (vectorResults.length > 0) {
-          // Map vector results back to full fact objects
-          const factMap = Object.fromEntries(facts.map(f => [f.id, f]));
-          selectedFacts = vectorResults
-            .map(r => ({ ...factMap[r.factId], _score: r.score }))
-            .filter(Boolean)
-            .slice(0, 8);
-        }
-      } catch (e) {
-        console.warn('[MemBrain] Vector search failed, falling back to keyword:', e.message);
-      }
-    }
-
-    // ── Keyword fallback (if semantic gave no results or no message context) ──
-    if (!selectedFacts.length) {
-      selectedFacts = facts
-        .sort((a, b) => {
-          const w = { high: 3, medium: 2, low: 1 };
-          return (w[b.confidence] || 0) - (w[a.confidence] || 0) || (b.timestamp || 0) - (a.timestamp || 0);
-        })
-        .slice(0, 8);
-    }
+    const selectedFacts = facts
+      .sort((a, b) => {
+        const w = { high: 3, medium: 2, low: 1 };
+        return (w[b.confidence] || 0) - (w[a.confidence] || 0) || (b.timestamp || 0) - (a.timestamp || 0);
+      })
+      .slice(0, 8);
 
     const block = `<memory_context>\n${selectedFacts.map(f => `- ${f.content} (${f.confidence || 'medium'})`).join('\n')}\n</memory_context>`;
 
     return {
       enabled: true,
       block,
-      facts: selectedFacts.map(f => ({
-        content: f.content,
-        category: f.category,
-        confidence: f.confidence,
-        score: f._score,
-      })),
-      method: selectedFacts[0]?._score ? 'semantic' : 'keyword',
+      facts: selectedFacts.map(f => ({ content: f.content, category: f.category, confidence: f.confidence })),
+      method: 'facts',
+      source: 'local',
     };
   } catch (e) {
     return { enabled: false, block: '', facts: [], error: e.message };
   }
 }
+
 
 
 // ==================== OPTIONS PAGE HANDLERS ====================
