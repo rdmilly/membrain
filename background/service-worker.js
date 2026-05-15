@@ -67,8 +67,9 @@ const CONFIG = {
   BACKEND_URL: 'https://helix.millyweb.com',
   API_KEY: 'ce-prod-6292b483717db14c83924a52715988ae',
   FLUSH_INTERVAL_MINUTES: 2,
-  EXTENSION_VERSION: '0.5.2',
+  EXTENSION_VERSION: '1.4.1',
 };
+globalThis.CONFIG = CONFIG;  // expose for DevTools console
 
 // ==================== INIT ====================
 
