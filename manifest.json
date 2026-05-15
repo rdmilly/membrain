@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MemBrain",
-  "version": "1.0.8",
+  "version": "1.4.1",
   "description": "AI conversation intelligence + token usage tracking across platforms.",
   "permissions": [
     "storage",
