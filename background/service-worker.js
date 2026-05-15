@@ -23,6 +23,8 @@ import { mirrorIndex as _mirrorIndexSingleton } from '../lib/mirror-index.js';
 import { memoryStorage } from '../lib/storage.js';
 import { FactExtractor } from '../lib/fact-extractor.js';
 import { MemoryInjector } from '../lib/memory-injector.js';
+import { buildDictionary, getDictionary } from '../lib/symbol-dictionary.js';
+import { ingestAllFacts, queryGraph, getGraphStats } from '../lib/knowledge-graph.js';
 import {
   inputBus,
   outputBus,
@@ -242,6 +244,9 @@ inputBus.on(EVENTS.FACTS_EXTRACTED, async ({ facts, conversationId }) => {
     }
   }
 
+  // Ingest new facts into knowledge graph (non-blocking)
+  ingestAllFacts(facts).catch(e => console.warn('[MemBrain] KG ingest error:', e));
+
   console.debug(`[MemBrain] Saved ${facts.length} facts from ${conversationId}`);
   outputBus.emit(EVENTS.STATS_UPDATE, { factsAdded: facts.length });
 });
@@ -400,6 +405,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       getConversationsForPopup(message.data).then(sendResponse);
       return true;
 
+    case 'get-all-conversations':
+      memoryStorage.getConversations({ limit: 9999 }).then(sendResponse);
+      return true;
+
+    case 'open-options':
+      chrome.runtime.openOptionsPage();
+      sendResponse({ ok: true });
+      return true;
+
+    case 'mark-all-synced':
+      (async () => {
+        const convs = await memoryStorage.getConversations({ limit: 9999 });
+        for (const c of convs) { await memoryStorage.markSynced(c.id); }
+        sendResponse({ marked: convs.length });
+      })();
+      return true;
+
+    case 'get-graph-stats':
+      getGraphStats().then(stats => sendResponse(stats));
+      return true;
+    case 'get-dictionary':
+      getDictionary().then(dict => sendResponse({ symbols: dict }));
+      return true;
     case 'get-stats':
       getFullStats().then(sendResponse);
       return true;
@@ -762,7 +790,28 @@ async function getInjectionForPage(data) {
       }
     }
 
-    // ── LAYER 2: Extracted facts fallback ─────────────────────────────────
+
+    // ── LAYER 2: Knowledge Graph ─────────────────────────────────────────
+    if (userMessage.trim().length > 5) {
+      try {
+        const kgContext = await queryGraph(userMessage, 2);
+        if (kgContext && kgContext.length > 50) {
+          console.debug('[MemBrain] KG hit:', kgContext.split('\n').length, 'lines');
+          const kgBlock = '<helix_context>\n' + kgContext + '\n</helix_context>';
+          return {
+            enabled: true,
+            block: kgBlock,
+            facts: [],
+            method: 'kg',
+            source: 'local',
+          };
+        }
+      } catch(e) {
+        console.warn('[MemBrain] KG query error:', e.message);
+      }
+    }
+
+    // ── LAYER 3: Extracted facts fallback ─────────────────────────────────
     const facts = await memoryStorage.getFacts();
     if (!facts.length) return { enabled: true, block: '', facts: [], method: 'none', source: 'local' };
 
@@ -1097,3 +1146,152 @@ async function cleanMirrorIndex() {
     console.warn('[MemBrain] Cleanup failed:', e.message);
   }
 }
+
+
+// ==================== SYMBOL DICTIONARY ====================
+
+async function broadcastDictionary() {
+  try {
+    const dict = await getDictionary();
+    if (dict.length === 0) {
+      console.debug('[MemBrain] Symbol dict empty, skipping broadcast');
+      return;
+    }
+    // Broadcast to all active AI tabs via chrome.tabs.sendMessage
+    const tabs = await chrome.tabs.query({});
+    const aiPatterns = [/claude\.ai/, /chatgpt\.com/, /chat\.openai\.com/, /gemini\.google\.com/, /perplexity\.ai/];
+    let sent = 0;
+    for (const tab of tabs) {
+      if (!tab.url || !aiPatterns.some(p => p.test(tab.url))) continue;
+      try {
+        await chrome.tabs.sendMessage(tab.id, {
+          _membrainBusEvent: true,
+          event: 'dictionary.update',
+          payload: { symbols: dict },
+        });
+        sent++;
+      } catch { /* tab may not have content script */ }
+    }
+    console.debug(`[MemBrain] Symbol dict broadcast: ${dict.length} symbols to ${sent} tabs`);
+    return dict;
+  } catch(e) {
+    console.warn('[MemBrain] Dictionary broadcast failed:', e);
+  }
+}
+
+async function refreshDictionary() {
+  try {
+    await memoryStorage.ready();
+    const convos = await memoryStorage.getConversations({ limit: 500 });
+    console.debug(`[MemBrain] Building symbol dict from ${convos.length} conversations...`);
+    if (convos.length === 0) {
+      console.debug('[MemBrain] No conversations for dict build, skipping');
+      return;
+    }
+    await buildDictionary(convos);
+    await broadcastDictionary();
+  } catch(e) {
+    console.warn('[MemBrain] Dictionary refresh failed:', e);
+  }
+}
+
+// ==================== AUTO-UPDATE via SSE (v1.0) ====================
+// Replaces polling entirely. EventSource holds one persistent connection.
+// Server broadcasts instantly when version.json changes.
+// SW stays alive naturally — no throttling, no setInterval fights.
+
+const UPDATE_SSE_URL   = 'https://update.membrain.millyweb.com/events';
+const UPDATE_CHECK_URL = 'https://update.membrain.millyweb.com/version.json'; // fallback
+const NATIVE_HOST = 'com.millyweb.membrain';
+
+// Apply an update received from SSE or fallback poll
+function applyUpdate(remote) {
+  const current = chrome.runtime.getManifest().version;
+  if (!remote?.version || remote.version === current) return;
+  console.log(`[MemBrain] Update available: ${current} -> ${remote.version}`);
+  chrome.runtime.sendNativeMessage(NATIVE_HOST, {
+    action: 'update',
+    version: remote.version,
+    zip_url: remote.zip_url,
+  }, (response) => {
+    if (chrome.runtime.lastError) {
+      console.warn('[MemBrain] Native host unavailable:', chrome.runtime.lastError.message);
+      chrome.notifications?.create('mb-update', {
+        type: 'basic',
+        iconUrl: '/icons/icon48.png',
+        title: 'MemBrain Update Available',
+        message: `v${remote.version} ready. ${remote.changelog || ''}`,
+        buttons: [{ title: 'Download' }],
+        priority: 1,
+      });
+      return;
+    }
+    if (response?.ok) {
+      console.log('[MemBrain] Update extracted, reloading...');
+      setTimeout(() => chrome.runtime.reload(), 1500);
+    } else {
+      console.error('[MemBrain] Update failed:', response?.error);
+    }
+  });
+}
+
+// Notification click — open download page
+chrome.notifications?.onButtonClicked?.addListener((id, btnIdx) => {
+  if (id === 'mb-update' && btnIdx === 0) {
+    chrome.tabs.create({ url: UPDATE_CHECK_URL });
+  }
+});
+
+// SSE connection — persistent, server pushes instantly on version change
+function connectUpdateSSE() {
+  console.log('[MemBrain] Connecting to update SSE...');
+  let retryDelay = 2000;
+
+  function connect() {
+    const es = new EventSource(UPDATE_SSE_URL);
+
+    es.addEventListener('version', (e) => {
+      try {
+        const remote = JSON.parse(e.data);
+        console.log('[MemBrain] SSE version event:', remote.version);
+        applyUpdate(remote);
+      } catch {}
+    });
+
+    es.onopen = () => {
+      console.log('[MemBrain] SSE connected to update server');
+      retryDelay = 2000; // reset backoff on success
+    };
+
+    es.onerror = () => {
+      console.warn(`[MemBrain] SSE disconnected, retrying in ${retryDelay}ms...`);
+      es.close();
+      // Exponential backoff, cap at 60s
+      setTimeout(connect, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, 60000);
+    };
+  }
+
+  connect();
+}
+
+// Start SSE after 3s (let SW fully initialize first)
+setTimeout(connectUpdateSSE, 3000);
+// Broadcast symbol dictionary on startup
+setTimeout(refreshDictionary, 5000);
+// Refresh dictionary every 30 minutes
+setInterval(refreshDictionary, 30 * 60 * 1000);
+
+// Initialize knowledge graph from existing facts
+setTimeout(async () => {
+  try {
+    await memoryStorage.ready();
+    const facts = await memoryStorage.getFacts();
+    if (facts.length > 0) {
+      await ingestAllFacts(facts);
+      console.debug(`[MemBrain] KG initialized from ${facts.length} facts`);
+    } else {
+      console.debug('[MemBrain] KG init: no facts yet, skipping');
+    }
+  } catch(e) { console.warn('[MemBrain] KG init failed:', e); }
+}, 8000);

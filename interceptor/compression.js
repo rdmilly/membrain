@@ -27,16 +27,42 @@
     stats: { requests_compressed: 0, tokens_saved_est: 0 },
   };
 
+  // Dynamic symbol dictionary received from SW via bridge
+  let symbolMap = new Map();   // phrase → §symbol
+  let expandMap = new Map();   // §symbol → phrase
+  let symbolDictionary = [];   // full list for SPEC
+
+  function updateDictionary(symbols) {
+    symbolMap.clear(); expandMap.clear();
+    symbolDictionary = symbols || [];
+    for (const { symbol, phrase } of symbolDictionary) {
+      if (symbol && phrase) {
+        symbolMap.set(phrase.toLowerCase(), symbol);
+        expandMap.set(symbol, phrase);
+      }
+    }
+    console.debug(`[MemBrain] Symbol dict: ${symbolDictionary.length} symbols`);
+  }
+
   // ==================== COMPRESSION SPEC ====================
-  // Teaches the LLM to output shorter. ~137 tokens.
-  const SPEC = [
-    '--- CMPRS ---',
-    'Respond concisely. Skip filler phrases.',
-    'DROP: essentially, basically, actually, "hope this helps", "it\'s worth noting", "I\'d be happy to", "feel free to", "let me know if you have any questions"',
-    'ABR: info config app env docs impl reqs deps perf auth auto comms org fn svc param',
-    'RULE: terse prose. no filler. code unchanged.',
-    '--- END ---',
-  ].join('\n');
+  // Dynamically built — includes symbol dictionary when available
+  function buildSpec() {
+    const lines = [
+      '--- CMPRS ---',
+      'Respond concisely. Skip filler phrases.',
+      "DROP: essentially, basically, actually, hope this helps, it's worth noting, I'd be happy to",
+      'ABR: info config app env docs impl reqs deps perf auth auto comms org fn svc param',
+    ];
+    if (symbolDictionary.length > 0) {
+      const top = symbolDictionary.slice(0, 20);
+      const dictStr = top.map(({symbol, phrase}) => `${symbol}=${phrase}`).join(' ');
+      lines.push(`SYMBOLS: ${dictStr}`);
+      lines.push('USE: replace above phrases with their § code in your responses.');
+    }
+    lines.push('RULE: terse prose. no filler. code unchanged.');
+    lines.push('--- END ---');
+    return lines.join('\n');
+  }
 
   // ==================== PHRASE COMPRESSIONS ====================
   const PHRASES = [
@@ -78,6 +104,7 @@
   function compressText(text) {
     if (!text || text.length < 30) return text;
     let r = text;
+    // Static phrase replacements
     for (const [phrase, rep] of PHRASES) {
       r = r.replace(new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), rep);
     }
@@ -87,8 +114,31 @@
     for (const [full, short] of WORD_ABBREVS) {
       r = r.replace(new RegExp('\\b' + full + '\\b', 'gi'), short);
     }
+    // Dynamic symbol substitution (longest phrases first to avoid partial matches)
+    if (symbolMap.size > 0) {
+      const sortedPhrases = [...symbolMap.entries()]
+        .sort((a, b) => b[0].length - a[0].length);
+      for (const [phrase, symbol] of sortedPhrases) {
+        r = r.replace(new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), symbol);
+      }
+    }
     return r.replace(/\s+/g, ' ').trim().replace(/ +([.,;:])/g, '$1');
   }
+
+  // ==================== RESPONSE EXPANDER ====================
+  // Expands § symbols in Claude's responses back to plain text
+  function expandText(text) {
+    if (!text || expandMap.size === 0) return text;
+    let r = text;
+    for (const [symbol, phrase] of expandMap.entries()) {
+      // Match symbol followed by word boundary or space
+      r = r.replace(new RegExp(symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?=[\\s.,;:!?]|$)', 'g'), phrase);
+    }
+    return r;
+  }
+
+  // Expose expander globally for interceptor to use
+  window.__membrainExpand = expandText;
 
   // ==================== INJECT INTO REQUEST ====================
 
@@ -106,7 +156,7 @@
     if (body.prompt && typeof body.prompt === 'string') {
       const original = body.prompt;
       const compressed = compressText(original);
-      body.prompt = SPEC + '\n\n' + compressed;
+      body.prompt = buildSpec() + '\n\n' + compressed;
       rawTokens = Math.ceil(original.length / 4);
       tokensSaved = Math.max(0, Math.ceil((original.length - compressed.length) / 4));
       modified = true;
@@ -116,7 +166,7 @@
         if (typeof lastUser.content === 'string' && lastUser.content.length > 10) {
           const original = lastUser.content;
           const compressed = compressText(original);
-          lastUser.content = SPEC + '\n\n' + compressed;
+          lastUser.content = buildSpec() + '\n\n' + compressed;
           rawTokens = Math.ceil(original.length / 4);
           tokensSaved = Math.max(0, Math.ceil((original.length - compressed.length) / 4));
           modified = true;
@@ -125,7 +175,7 @@
           if (textBlock && textBlock.text?.length > 10) {
             const original = textBlock.text;
             const compressed = compressText(original);
-            textBlock.text = SPEC + '\n\n' + compressed;
+            textBlock.text = buildSpec() + '\n\n' + compressed;
             rawTokens = Math.ceil(original.length / 4);
             tokensSaved = Math.max(0, Math.ceil((original.length - compressed.length) / 4));
             modified = true;
@@ -194,15 +244,34 @@
 
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
-    if (event.data?.source === 'memory-ext' && event.data?.type === 'memory-ext:compression-toggle') {
+    if (!event.data?.source?.startsWith('memory-ext') && event.data?.source !== 'memory-ext') return;
+    if (event.data.type === 'memory-ext:compression-toggle') {
       state.enabled = !!event.data.payload?.enabled;
       console.debug('[MemBrain] Compression', state.enabled ? 'ENABLED' : 'DISABLED');
+    }
+    if (event.data.type === 'memory-ext:dictionary-update') {
+      updateDictionary(event.data.payload?.symbols || []);
+      // Notify HUD about symbol promotions
+      const newSymbols = event.data.payload?.symbols || [];
+      for (const entry of newSymbols) {
+        window.postMessage({
+          source: 'memory-ext',
+          type: 'memory-ext:symbol-promoted',
+          payload: { symbol: entry.symbol, phrase: entry.phrase },
+        }, '*');
+      }
     }
   });
 
   // ==================== INIT ====================
 
   installFetchHook();
+
+  // Pull dictionary on load rather than waiting for broadcast
+  setTimeout(() => {
+    window.postMessage({ source: 'memory-ext', type: 'memory-ext:request-dictionary' }, '*');
+    console.debug('[MemBrain] Compression requested dictionary');
+  }, 2000);
 
   window.__membrainCompression = state;
   console.debug('[MemBrain] Compression module loaded (disabled, waiting for toggle)');

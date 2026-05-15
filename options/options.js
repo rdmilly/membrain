@@ -327,52 +327,164 @@ document.getElementById('disconnectBackendBtn')?.addEventListener('click', async
 });
 
 // ==================== MIGRATE / UPGRADE ====================
+// Full conversation migration: reads ALL IndexedDB convos, batches to
+// POST /api/v1/ext/migrate on Helix, then flips storageMode -> cloud
 
 document.getElementById('migrateBtn').addEventListener('click', async () => {
   const token = document.getElementById('cloudToken').value.trim();
+  const backendUrl = (document.getElementById('backendUrl')?.value || '').trim();
   const clearLocal = document.getElementById('clearLocalAfterMigrate').checked;
+
   const statusEl = document.getElementById('migrateStatus');
   const progressBar = document.getElementById('migrateProgress');
   const progressFill = document.getElementById('migrateProgressFill');
+  const btn = document.getElementById('migrateBtn');
 
   if (!token) {
     statusEl.textContent = 'Enter your Cortex API token';
     statusEl.style.color = '#f87171';
     return;
   }
-
-  const btn = document.getElementById('migrateBtn');
-  btn.disabled = true;
-  btn.textContent = '⚡ Migrating…';
-  statusEl.textContent = 'Exporting local data…';
-  statusEl.style.color = '#8b949e';
-  progressBar.style.display = 'block';
-  progressFill.style.width = '20%';
-
-  // Send tier upgrade event to SW — it handles migration via VectorBackendFactory.migrate()
-  const result = await send('tier-upgrade', { token, clearLocal });
-  // Switch to cloud mode on success
-  if (result?.success !== false) {
-    await send('save-settings', { storageMode: 'cloud', backendUrl: document.getElementById('backendUrl')?.value || '' });
+  if (!backendUrl) {
+    statusEl.textContent = 'Enter a backend URL in the Connect section above';
+    statusEl.style.color = '#f87171';
+    return;
   }
 
-  progressFill.style.width = '100%';
+  btn.disabled = true;
+  btn.textContent = '⚡ Migrating…';
+  statusEl.style.color = '#8b949e';
+  progressBar.style.display = 'block';
 
-  if (result?.success) {
-    statusEl.textContent = `✓ Migrated ${result.migrated} facts to Cortex`;
-    statusEl.style.color = '#4ade80';
-    btn.textContent = '✓ Upgraded';
-    toast(`Migrated ${result.migrated} facts — now on Cortex cloud tier`, 'success', 5000);
-    document.getElementById('cloudToken').value = '';
-    setTimeout(() => { progressBar.style.display = 'none'; loadAll(); }, 1500);
-  } else {
-    statusEl.textContent = result?.error || 'Migration failed';
+  // 1. Read ALL conversations from IndexedDB via SW
+  statusEl.textContent = 'Reading local conversations…';
+  progressFill.style.width = '5%';
+
+  const convos = await send('get-all-conversations');
+  if (!convos || convos.length === 0) {
+    statusEl.textContent = 'No local conversations found';
+    statusEl.style.color = '#8b949e';
+    btn.disabled = false;
+    btn.textContent = '⚡ Migrate & Upgrade';
+    progressBar.style.display = 'none';
+    return;
+  }
+
+  // 2. Flatten conversations into TurnPayload array
+  const allTurns = [];
+  for (const conv of convos) {
+    for (const turn of (conv.turns || [])) {
+      allTurns.push({
+        id: turn.id || null,
+        platform: turn.platform || conv.platform || 'claude',
+        conversationId: conv.id,
+        role: turn.role || 'assistant',
+        content: turn.content || '',
+        captureType: turn.captureType || 'turn',
+        url: turn.url || conv.url || null,
+        timestamp: turn.timestamp || conv.updatedAt || Date.now(),
+      });
+    }
+  }
+
+  if (allTurns.length === 0) {
+    statusEl.textContent = 'Conversations found but no turns to migrate';
     statusEl.style.color = '#f87171';
     btn.disabled = false;
     btn.textContent = '⚡ Migrate & Upgrade';
     progressBar.style.display = 'none';
-    toast('Migration failed: ' + (result?.error || 'unknown error'), 'error');
+    return;
   }
+
+  // 3. Batch and POST to /api/v1/ext/migrate
+  const BATCH_SIZE = 25; // conversations per batch
+  // Group turns back into batches by a max of BATCH_SIZE unique convIds
+  const convGroups = {};
+  for (const t of allTurns) {
+    if (!convGroups[t.conversationId]) convGroups[t.conversationId] = [];
+    convGroups[t.conversationId].push(t);
+  }
+  const convIds = Object.keys(convGroups);
+  const batches = [];
+  for (let i = 0; i < convIds.length; i += BATCH_SIZE) {
+    const batchIds = convIds.slice(i, i + BATCH_SIZE);
+    const batchTurns = batchIds.flatMap(id => convGroups[id]);
+    batches.push(batchTurns);
+  }
+
+  const migrationId = `mig-${Date.now()}`;
+  let totalIngested = 0;
+  let totalSkipped = 0;
+  let totalErrors = 0;
+
+  for (let b = 0; b < batches.length; b++) {
+    const pct = Math.round(10 + ((b / batches.length) * 80));
+    progressFill.style.width = `${pct}%`;
+    statusEl.textContent = `Batch ${b + 1}/${batches.length} — ${totalIngested} migrated…`;
+
+    try {
+      const resp = await fetch(`${backendUrl}/api/v1/ext/migrate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'X-API-Key': token } : {}),
+        },
+        body: JSON.stringify({
+          turns: batches[b],
+          extensionVersion: (await send('get-stats'))?.version || 'unknown',
+          migrationId,
+          flushedAt: new Date().toISOString(),
+        }),
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 120)}`);
+      }
+
+      const result = await resp.json();
+      totalIngested += result.ingested || 0;
+      totalSkipped += result.skipped || 0;
+      totalErrors += result.errors || 0;
+
+    } catch (e) {
+      console.error(`[Migrate] Batch ${b + 1} failed:`, e);
+      totalErrors++;
+      toast(`Batch ${b + 1} error: ${e.message}`, 'error');
+    }
+  }
+
+  progressFill.style.width = '100%';
+
+  // 4. Save backend connection and flip storageMode -> cloud
+  await send('save-settings', { storageMode: 'cloud', backendUrl, syncEnabled: true });
+  if (token) await send('save-settings', { backendApiKey: token });
+
+  if (clearLocal && totalIngested > 0) {
+    // Only clear if at least some migrated successfully
+    // Leave conversations in IndexedDB but mark them synced — don't hard-delete
+    await send('mark-all-synced');
+  }
+
+  // 5. Done — show result
+  if (totalErrors === 0) {
+    statusEl.textContent = `✓ ${totalIngested} conversations migrated, ${totalSkipped} already existed`;
+    statusEl.style.color = '#4ade80';
+    btn.textContent = '✓ Upgraded';
+    toast(`Migrated ${totalIngested} conversations to Helix`, 'success', 5000);
+    document.getElementById('cloudToken').value = '';
+  } else {
+    statusEl.textContent = `⚠ ${totalIngested} migrated, ${totalErrors} failed — check console`;
+    statusEl.style.color = '#f59e0b';
+    btn.disabled = false;
+    btn.textContent = '⚡ Retry Migration';
+    toast(`${totalIngested} migrated, ${totalErrors} errors`, 'error');
+  }
+
+  setTimeout(() => {
+    progressBar.style.display = 'none';
+    loadAll();
+  }, 2000);
 });
 
 document.getElementById('downgradeLink').addEventListener('click', async (e) => {

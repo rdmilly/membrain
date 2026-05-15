@@ -372,6 +372,10 @@
 
     const result = reassembler.finish();
     if (result) {
+      // Expand § symbols in response if expander is available
+      if (result.content && typeof window.__membrainExpand === 'function') {
+        result.content = window.__membrainExpand(result.content);
+      }
       emit(MSG_TYPES.STREAM_COMPLETE, {
         ...result,
         url: typeof response.url === 'string' ? response.url : '',

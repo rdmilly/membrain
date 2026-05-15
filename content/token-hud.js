@@ -1,5 +1,5 @@
 /**
- * MemBrain — Token Counter & Compression HUD v0.5.9
+ * MemBrain — Token Counter & Compression HUD v0.6.0
  *
  * Two tabs:
  *   [Tokens]      — input/output counts, compression comparison, cost estimate
@@ -26,7 +26,7 @@
     compressionSaved: 0,
     conversationRawInput: 0,
     sessionRawInput: 0,
-    activeTab: 'tokens',
+    activeTab: 'intelligence',
   };
 
   // Intelligence tab live data (not persisted)
@@ -36,6 +36,7 @@
     totalInjected: 0,  // chars
     totalSaved: 0,     // tokens
     lifetimeSaved: 604,// from storage
+    rawLines: [],      // live raw text stream [{text, role, ts, hasSymbols}]
   };
 
   let liveData = {
@@ -45,14 +46,55 @@
     lastFetch: 0,
   };
 
+
+  // Memory Health Score (0-100): recency 35%, volume 25%, facts 25%, depth 15%
+  function memoryHealthScore() {
+    const injections = intel.stream.filter(e => e.type === 'inject');
+    if (injections.length === 0) return { score: 0, label: 'No Data', color: '#475569', bars: [] };
+    const last = injections[injections.length - 1];
+    const secsSince = last ? (Date.now() - (last.ts || 0)) / 1000 : 9999;
+    const factCount = injections.reduce((a, e) => a + (e.factsCount || 0), 0);
+    const totalChars = injections.reduce((a, e) => a + (e.chars || 0), 0);
+    const recency = secsSince < 30 ? 100 : secsSince < 120 ? 80 : secsSince < 300 ? 55 : secsSince < 900 ? 30 : 10;
+    const volume  = Math.min(100, Math.round((totalChars / 2000) * 100));
+    const facts   = Math.min(100, factCount * 12);
+    const depth   = Math.min(100, injections.length * 20);
+    const score = Math.round(recency * 0.35 + volume * 0.25 + facts * 0.25 + depth * 0.15);
+    const label = score >= 80 ? 'Strong' : score >= 55 ? 'Good' : score >= 30 ? 'Partial' : 'Weak';
+    const color = score >= 80 ? '#34d399' : score >= 55 ? '#60a5fa' : score >= 30 ? '#facc15' : '#f87171';
+    return {
+      score, label, color,
+      bars: [
+        { label: 'Recency', val: recency, color: '#a78bfa' },
+        { label: 'Volume',  val: volume,  color: '#60a5fa' },
+        { label: 'Facts',   val: facts,   color: '#34d399' },
+        { label: 'Depth',   val: depth,   color: '#facc15' },
+      ]
+    };
+  }
+
   async function loadState() {
     try {
       const r = await chrome.storage.session.get(STORAGE_KEY);
       if (r[STORAGE_KEY]) state = { ...state, ...r[STORAGE_KEY] };
+      // Load persistent UI prefs (minimized survives browser restarts)
+      const lp = await chrome.storage.local.get(STORAGE_KEY + '_prefs');
+      if (lp[STORAGE_KEY + '_prefs']) {
+        const prefs = lp[STORAGE_KEY + '_prefs'];
+        if (typeof prefs.minimized === 'boolean') state.minimized = prefs.minimized;
+        if (prefs.activeTab) state.activeTab = prefs.activeTab;
+      }
     } catch {}
   }
   async function saveState() {
-    try { await chrome.storage.session.set({ [STORAGE_KEY]: state }); } catch {}
+    try {
+      await chrome.storage.session.set({ [STORAGE_KEY]: state });
+      // Persist UI prefs across sessions
+      await chrome.storage.local.set({ [STORAGE_KEY + '_prefs']: {
+        minimized: state.minimized,
+        activeTab: state.activeTab,
+      }});
+    } catch {}
   }
 
   async function fetchLiveData() {
@@ -60,14 +102,37 @@
     if (now - liveData.lastFetch < 4000) return;
     liveData.lastFetch = now;
     try {
-      const [statsRes, convsRes, interceptorData] = await Promise.all([
+      const [statsRes, convsRes, interceptorData, kgStats] = await Promise.all([
         sendToSW({ action: 'get-stats' }),
         sendToSW({ action: 'get-conversations', data: { limit: 10 } }),
         chrome.storage.session.get('interceptor_status'),
+        sendToSW({ action: 'get-graph-stats' }),
       ]);
       liveData.stats = statsRes;
       liveData.conversations = convsRes?.conversations || [];
       liveData.interceptors = interceptorData?.interceptor_status || {};
+      liveData.kgStats = kgStats || { entities: 0, relations: 0, topEntities: [] };
+      // Fallback: direct IDB read if SW stats show 0 convos
+      if (!liveData.stats?.db?.conversations) {
+        try {
+          const req2 = indexedDB.open("memory-ext", 5);
+          req2.onsuccess = (e2) => {
+            const db2 = e2.target.result;
+            if (!db2.objectStoreNames.contains("conversations")) return;
+            const cr = db2.transaction("conversations","readonly").objectStore("conversations").count();
+            cr.onsuccess = (ev) => {
+              const c = ev.target.result;
+              if (c > 0) {
+                if (!liveData.stats) liveData.stats = {};
+                if (!liveData.stats.db) liveData.stats.db = {};
+                liveData.stats.db.conversations = c;
+                const el = document.getElementById("mb-conv-count");
+                if (el) el.textContent = c;
+              }
+            };
+          };
+        } catch {}
+      }
     } catch {}
   }
 
@@ -115,6 +180,8 @@
         position: fixed; bottom: 16px; right: 16px; z-index: 2147483646;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
         user-select: none; pointer-events: auto;
+        display: flex; flex-direction: column; justify-content: flex-end;
+        max-height: calc(100vh - 32px);
       }
       .mb-card {
         background: rgba(13, 13, 25, 0.96); border: 1px solid rgba(100, 116, 139, 0.22);
@@ -122,10 +189,12 @@
         backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
         box-shadow: 0 6px 32px rgba(0,0,0,0.5); transition: border-color 0.3s;
         overflow: hidden;
+        max-height: calc(100vh - 100px);
+        display: flex; flex-direction: column;
       }
       .mb-card.active { border-color: rgba(52, 211, 153, 0.3); }
       .mb-card:hover { border-color: rgba(139, 92, 246, 0.25); }
-      .mb-head { display: flex; align-items: center; justify-content: space-between; padding: 11px 14px 9px; border-bottom: 1px solid rgba(100, 116, 139, 0.1); }
+      .mb-head { display: flex; align-items: center; justify-content: space-between; padding: 11px 14px 9px; border-bottom: 1px solid rgba(100, 116, 139, 0.1); flex-shrink: 0; }
       .mb-brand { display: flex; align-items: center; gap: 7px; }
       .mb-logo { width: 20px; height: 20px; border-radius: 5px; background: linear-gradient(135deg, #8b5cf6, #06b6d4); display: flex; align-items: center; justify-content: center; font-size: 11px; color: white; font-weight: 800; flex-shrink: 0; }
       .mb-name { font-size: 12px; font-weight: 700; letter-spacing: 0.7px; background: linear-gradient(135deg, #a78bfa, #67e8f9); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
@@ -135,14 +204,14 @@
       .mb-btns { display: flex; gap: 2px; }
       .mb-btn { background: none; border: none; color: #475569; cursor: pointer; font-size: 14px; padding: 2px 5px; border-radius: 4px; line-height: 1; }
       .mb-btn:hover { color: #a78bfa; background: rgba(167,139,250,0.1); }
-      .mb-tabs { display: flex; border-bottom: 1px solid rgba(100,116,139,0.1); }
+      .mb-tabs { display: flex; border-bottom: 1px solid rgba(100,116,139,0.1); flex-shrink: 0; }
       .mb-tab { flex: 1; padding: 6px 0; text-align: center; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #475569; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; }
       .mb-tab.active { color: #a78bfa; border-bottom-color: #a78bfa; }
       .mb-tab:hover:not(.active) { color: #94a3b8; }
       .mb-tab-badge { display: inline-block; background: rgba(139,92,246,0.2); color: #a78bfa; font-size: 9px; padding: 0px 4px; border-radius: 8px; margin-left: 3px; font-weight: 700; }
       .mb-tab-badge.green { background: rgba(52,211,153,0.15); color: #34d399; }
       .mb-tab-badge.yellow { background: rgba(250,204,21,0.15); color: #facc15; }
-      .mb-panel { padding: 11px 14px 12px; }
+      .mb-panel { padding: 11px 14px 12px; overflow-y: auto; flex: 1; }
       .mb-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 13px; }
       .mb-lbl { color: #64748b; font-size: 11px; font-weight: 500; }
       .mb-val { font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -218,7 +287,7 @@
       .mb-mini-pct { font-size: 10px; font-weight: 700; color: #34d399; background: rgba(52,211,153,0.12); padding: 1px 5px; border-radius: 8px; }
       .mb-mini-cap { font-size: 10px; color: #a78bfa; background: rgba(139,92,246,0.1); padding: 1px 5px; border-radius: 8px; }
       /* Intelligence tab */
-      .mb-intel-stream { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; padding-bottom: 4px; }
+      .mb-intel-stream { max-height: 140px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; padding-bottom: 4px; }
       .mb-intel-stream::-webkit-scrollbar { width: 3px; }
       .mb-intel-stream::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.3); border-radius: 2px; }
       .mb-intel-event { padding: 7px 9px; border-radius: 7px; font-size: 11px; border-left: 3px solid #334155; background: rgba(255,255,255,0.02); animation: mb-fadein 0.4s ease; }
@@ -252,6 +321,19 @@
       .mb-intel-hdr { font-size: 10px; font-weight: 700; color: #475569; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 5px; display: flex; justify-content: space-between; }
       .mb-bar-wrap { height: 4px; background: rgba(100,116,139,0.15); border-radius: 2px; overflow: hidden; margin-top: 4px; }
       .mb-bar-fill { height: 100%; border-radius: 2px; transition: width 0.6s ease; background: linear-gradient(90deg, #6b21a8, #a78bfa); }
+      
+      /* v0.6.0 Health score tooltip */
+      .mb-health-tip { position:absolute; bottom:calc(100% + 4px); right:0; background:#0d0d19; border:1px solid rgba(100,116,139,0.2); border-radius:6px; padding:5px 8px; font-size:10px; color:#94a3b8; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity 0.15s; z-index:1; }
+      .mb-health-wrap:hover .mb-health-tip { opacity:1; }
+      .mb-health-wrap { position:relative; }
+      .mb-raw-stream { max-height: 160px; overflow-y: auto; font-family: monospace; font-size: 10px; line-height: 1.5; padding: 6px 8px; background: rgba(0,0,0,0.3); border-radius: 6px; border: 1px solid rgba(100,116,139,0.1); }
+      .mb-raw-stream::-webkit-scrollbar { width: 3px; }
+      .mb-raw-stream::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.3); border-radius: 2px; }
+      .mb-raw-line { padding: 1px 0; border-bottom: 0.5px solid rgba(100,116,139,0.05); word-break: break-all; }
+      .mb-raw-line.user { color: #60a5fa; }
+      .mb-raw-line.assistant { color: #94a3b8; }
+      .mb-raw-line .mb-sym-hit { color: #facc15; font-weight: 700; background: rgba(250,204,21,0.1); padding: 0 2px; border-radius: 2px; }
+      .mb-raw-line .mb-ctx-hit { color: #4ade80; background: rgba(74,222,128,0.08); padding: 0 2px; border-radius: 2px; }
       @keyframes mb-fadein { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
       @keyframes mb-popin  { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: scale(1); } }
     `;
@@ -290,68 +372,140 @@
   }
 
   function renderIntelligencePanel() {
-    const stream = intel.stream.slice().reverse(); // newest first
-    const symCount = intel.symbols.length;
-    const pctSaved = intel.totalSaved > 0 && state.conversationRawInput > 0
-      ? Math.round(intel.totalSaved / state.conversationRawInput * 100) : 0;
+    const stream = intel.stream.slice().reverse();
+    const health = memoryHealthScore();
+    const c = state.conversation;
+    const total = c.input + c.output;
+    const savingsPct = pct(state.compressionSaved, state.conversationRawInput || c.input);
+    const hasRealTokens = c.input > 0 || c.output > 0;
 
-    // Stats bar
-    const statsHTML = `
-      <div class="mb-intel-stats">
-        <div class="mb-intel-stat">
-          <div class="mb-intel-stat-val purple">${intel.stream.filter(e=>e.type==='inject').length}</div>
-          <div class="mb-intel-stat-lbl">Injections</div>
+    // ===== SECTION 1: TOKEN COUNTS =====
+    const tokenSection = `
+      <div style="margin-bottom:8px;padding:9px 11px;background:rgba(255,255,255,0.03);border:1px solid rgba(100,116,139,0.15);border-radius:9px;">
+        <div style="font-size:10px;font-weight:700;color:#475569;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:7px;display:flex;justify-content:space-between;align-items:center;">
+          <span>Token Counts</span>
+          <span style="font-size:9px;color:${hasRealTokens ? '#34d399' : '#475569'};">${hasRealTokens ? '• live from API' : '• send a message'}</span>
         </div>
-        <div class="mb-intel-stat">
-          <div class="mb-intel-stat-val yellow">${symCount}</div>
-          <div class="mb-intel-stat-lbl">§ Symbols</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;">
+          <div style="background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.2);border-radius:7px;padding:7px 8px;text-align:center;">
+            <div style="font-size:17px;font-weight:800;color:#60a5fa;font-variant-numeric:tabular-nums;">${fmt(c.input)}</div>
+            <div style="font-size:9px;color:#64748b;font-weight:600;margin-top:1px;">INPUT</div>
+          </div>
+          <div style="background:rgba(167,139,250,0.08);border:1px solid rgba(167,139,250,0.2);border-radius:7px;padding:7px 8px;text-align:center;">
+            <div style="font-size:17px;font-weight:800;color:#a78bfa;font-variant-numeric:tabular-nums;">${fmt(c.output)}</div>
+            <div style="font-size:9px;color:#64748b;font-weight:600;margin-top:1px;">OUTPUT</div>
+          </div>
+          <div style="background:rgba(241,245,249,0.04);border:1px solid rgba(100,116,139,0.15);border-radius:7px;padding:7px 8px;text-align:center;">
+            <div style="font-size:17px;font-weight:800;color:#f1f5f9;font-variant-numeric:tabular-nums;">${fmt(total)}</div>
+            <div style="font-size:9px;color:#64748b;font-weight:600;margin-top:1px;">TOTAL</div>
+          </div>
         </div>
-        <div class="mb-intel-stat">
-          <div class="mb-intel-stat-val green">${pctSaved > 0 ? pctSaved + '%' : fmt(intel.totalSaved)}</div>
-          <div class="mb-intel-stat-lbl">Saved</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:10px;color:#475569;">
+          <span>Turn ${c.turns} &middot; Session ${fmt(state.session.input + state.session.output)}</span>
+          <span style="color:#64748b;">${cost(c.input, c.output)} est.</span>
         </div>
       </div>`;
 
-    // Symbol dictionary row
-    const symsHTML = intel.symbols.length === 0
-      ? `<div class="mb-sym-row"><span class="mb-sym-empty">Symbols appear here as patterns are recognized…</span></div>`
-      : `<div class="mb-sym-row">${intel.symbols.map((s,i) => `<span class="mb-sym${i >= intel.symbols.length - 3 ? ' new' : ''}" title="${esc(s.phrase||'')}">${esc(s.symbol)}</span>`).join('')}</div>`;
+    // ===== SECTION 2: COMPRESSION =====
+    const rawInput = state.conversationRawInput || c.input;
+    const saved = state.compressionSaved || 0;
+    const compressionSection = `
+      <div style="margin-bottom:8px;padding:9px 11px;background:rgba(52,211,153,0.04);border:1px solid rgba(52,211,153,${state.compressionEnabled ? '0.2' : '0.08'});border-radius:9px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:${state.compressionEnabled ? '7' : '0'}px;">
+          <div style="font-size:10px;font-weight:700;color:#475569;letter-spacing:0.5px;text-transform:uppercase;display:flex;align-items:center;gap:5px;">
+            <span>⚡ Compression</span>
+            ${savingsPct ? '<span style="background:rgba(52,211,153,0.15);color:#34d399;font-size:9px;font-weight:700;padding:1px 5px;border-radius:8px;">-' + savingsPct + '%</span>' : ''}
+          </div>
+          <label class="mb-toggle" style="transform:scale(0.85);transform-origin:right center;"><input type="checkbox" id="mb-comp-toggle" ${state.compressionEnabled ? 'checked' : ''}><span class="mb-slider"></span></label>
+        </div>
+        ${state.compressionEnabled || saved > 0 ? `
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px;">
+            <div style="background:rgba(15,15,28,0.6);border-radius:6px;padding:6px 8px;text-align:center;">
+              <div style="font-size:9px;color:#64748b;font-weight:600;letter-spacing:0.4px;margin-bottom:2px;">WITHOUT</div>
+              <div style="font-size:14px;font-weight:700;color:#fb923c;font-variant-numeric:tabular-nums;">${fmt(rawInput)}</div>
+              <div style="font-size:8px;color:#475569;">est. tokens</div>
+            </div>
+            <div style="background:rgba(15,15,28,0.6);border-radius:6px;padding:6px 8px;text-align:center;">
+              <div style="font-size:9px;color:#64748b;font-weight:600;letter-spacing:0.4px;margin-bottom:2px;">WITH</div>
+              <div style="font-size:14px;font-weight:700;color:#34d399;font-variant-numeric:tabular-nums;">${fmt(c.input)}</div>
+              <div style="font-size:8px;color:#475569;">actual tokens</div>
+            </div>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;">
+            <span style="color:#64748b;">Tokens saved this convo</span>
+            <span style="color:#34d399;font-weight:700;">${fmt(saved)}${savingsPct ? '<span style="background:rgba(52,211,153,0.15);color:#34d399;font-size:9px;font-weight:700;padding:1px 5px;border-radius:8px;margin-left:4px;">-' + savingsPct + '%</span>' : ''}</span>
+          </div>` : `
+          <div style="font-size:10px;color:#475569;font-style:italic;">Toggle on to track savings</div>`}
+      </div>`;
+
+    // ===== SECTION 3: MEMORY HEALTH + STREAM =====
+    const injCount = intel.stream.filter(e=>e.type==='inject').length;
+    const pctSaved2 = intel.totalSaved > 0 && rawInput > 0
+      ? Math.round(intel.totalSaved / rawInput * 100) : 0;
+
+    const statsHTML = `
+      <div class="mb-intel-stats" style="margin-bottom:8px;">
+        <div class="mb-intel-stat"><div class="mb-intel-stat-val purple">${injCount}</div><div class="mb-intel-stat-lbl">Injections</div></div>
+        <div class="mb-intel-stat"><div class="mb-intel-stat-val yellow">${intel.symbols.length}</div><div class="mb-intel-stat-lbl">§ Symbols</div></div>
+        <div class="mb-intel-stat"><div class="mb-intel-stat-val green">${pctSaved2 > 0 ? pctSaved2 + '%' : fmt(intel.totalSaved)}</div><div class="mb-intel-stat-lbl">Saved</div></div>
+      </div>`;
+
+    const healthHTML = `
+      <div style="margin-bottom:8px;padding:9px 11px;background:rgba(255,255,255,0.03);border:1px solid rgba(100,116,139,0.15);border-radius:9px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <span style="font-size:10px;font-weight:700;color:#475569;letter-spacing:0.5px;text-transform:uppercase;">Memory Health</span>
+          <span style="font-size:18px;font-weight:800;color:${health.color};">${health.score}<span style="font-size:10px;opacity:0.7;">%</span></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:7px;">
+          <span style="font-size:11px;font-weight:700;color:${health.color};">${health.label}</span>
+          <div style="flex:1;height:4px;background:rgba(100,116,139,0.15);border-radius:2px;"><div style="height:100%;width:${health.score}%;background:${health.color};border-radius:2px;"></div></div>
+        </div>
+        ${statsHTML}
+        ${ liveData.kgStats && liveData.kgStats.entities > 0 ? `
+          <div style="display:flex;gap:8px;margin-top:5px;padding:5px 0;border-top:0.5px solid rgba(100,116,139,0.1);font-size:10px;">
+            <span style="color:#475569;">KG:</span>
+            <span style="color:#60a5fa;font-weight:600;">${liveData.kgStats.entities} entities</span>
+            <span style="color:#475569;">·</span>
+            <span style="color:#a78bfa;font-weight:600;">${liveData.kgStats.relations} relations</span>
+            ${liveData.kgStats.topEntities?.slice(0,3).map(e=>`<span style="color:#64748b;">${esc(e.name)}</span>`).join('<span style="color:#475569;"> · </span>') || ''}
+          </div>` : ''}
+        <div style="margin-top:7px;">
+          <div style="font-size:10px;font-weight:700;color:#475569;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:4px;display:flex;justify-content:space-between;">
+            <span>§ Symbol Dictionary</span>
+            <span style="font-size:9px;color:#334155;font-weight:400;">${intel.symbols.length} loaded</span>
+          </div>
+          ${ intel.symbols.length === 0
+            ? `<div style="font-size:10px;color:#475569;font-style:italic;">Loading… symbols arrive after first message</div>`
+            : `<div style="max-height:100px;overflow-y:auto;display:grid;grid-template-columns:auto 1fr auto;gap:2px 8px;align-items:center;">
+                ${[...intel.symbols].sort((a,b)=>(b.freq||0)-(a.freq||0)).slice(0,16).map(s=>`
+                  <span style="font-family:monospace;font-size:11px;font-weight:700;color:#facc15;background:rgba(250,204,21,0.1);padding:1px 4px;border-radius:3px;">${esc(s.symbol||'')}</span>
+                  <span style="font-size:10px;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s.phrase||'')}</span>
+                  <span style="font-size:9px;color:#475569;">${(s.freq||0)>90?'★':(s.freq||0)+'x'}</span>
+                `).join('')}
+              </div>`
+          }
+        </div>
+      </div>`;
 
     // Stream events
     let streamHTML = '<div class="mb-intel-stream">' ;
     if (stream.length === 0) {
-      streamHTML += '<div class="mb-empty">Send a message on Claude to see live injection events…</div>';
+      streamHTML += '<div class="mb-empty">Send a message to see live injection events…</div>';
     } else {
-      streamHTML += stream.slice(0, 12).map(ev => {
+      streamHTML += stream.slice(0, 8).map(ev => {
         if (ev.type === 'inject') {
           const layersHTML = (ev.layers || []).map(l => `<span class="mb-intel-layer ${l}">${l.toUpperCase()}</span>`).join('');
-          const ciHTML = ev.ciChars > 0 ? `<span class="mb-intel-layer ci">CI +${fmt(ev.ciChars)}c</span>` : '';
-          return `
-            <div class="mb-intel-event inject">
-              <div class="mb-intel-event-head">
-                <span class="mb-intel-badge inject">⚡ Inject</span>
-                <span class="mb-intel-time">${timeAgoShort(ev.ts)}</span>
-              </div>
-              <div class="mb-intel-detail">
-                <span class="hi">${fmt(ev.chars)}c</span> injected${ev.factsCount ? ' <span style="color:#4ade80">· ' + ev.factsCount + ' facts</span>' : ''}
-                ${ev.method ? ' <span style="color:#64748b">[' + ev.method + ']</span>' : ''}
-                ${ev.query ? ' · <span style="color:#64748b">' + esc(ev.query.slice(0,40)) + '</span>' : ''}
-              </div>
-              <div class="mb-intel-layers">${layersHTML}${ciHTML}</div>
-              <div class="mb-bar-wrap"><div class="mb-bar-fill" style="width:${Math.min(100, Math.round(ev.chars/50))}%"></div></div>
-            </div>`;
+          const factsHTML = ev.facts && ev.facts.length > 0
+            ? `<div style="margin-top:3px;">${ev.facts.slice(0,2).map(f => `<div style="font-size:9px;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">&middot; ${esc(typeof f==='string'?f:(f.content||'')).slice(0,55)}</div>`).join('')}</div>`
+            : '';
+          return `<div class="mb-intel-event inject">
+              <div class="mb-intel-event-head"><span class="mb-intel-badge inject">⚡ Inject</span><span class="mb-intel-time">${timeAgoShort(ev.ts)}</span></div>
+              <div class="mb-intel-detail"><span class="hi">${fmt(ev.chars)}c</span> &middot; <span style="color:#4ade80">${ev.factsCount||0} facts</span>${ev.method ? ` <span style="color:#64748b;font-size:9px">[${ev.method}]</span>` : ''}</div>
+              ${factsHTML}<div class="mb-intel-layers" style="margin-top:3px;">${layersHTML}</div></div>`;
         } else {
-          return `
-            <div class="mb-intel-event compress">
-              <div class="mb-intel-event-head">
-                <span class="mb-intel-badge compress">§ Compress</span>
-                <span class="mb-intel-time">${timeAgoShort(ev.ts)}</span>
-              </div>
-              <div class="mb-intel-detail">
-                <span class="hi">${fmt(ev.saved)}</span> tokens saved
-                ${ev.syms ? ' · <span class="sym">' + esc(ev.syms) + '</span>' : ''}
-              </div>
-            </div>`;
+          return `<div class="mb-intel-event compress">
+              <div class="mb-intel-event-head"><span class="mb-intel-badge compress">§ Compress</span><span class="mb-intel-time">${timeAgoShort(ev.ts)}</span></div>
+              <div class="mb-intel-detail"><span class="hi">${fmt(ev.saved)}</span> tokens saved${ev.syms ? ` &middot; <span class="sym">${esc(ev.syms)}</span>` : ''}</div></div>`;
         }
       }).join('');
     }
@@ -359,13 +513,15 @@
 
     return `
       <div class="mb-panel">
-        ${statsHTML}
-        <div class="mb-intel-hdr"><span>§ Symbol Dictionary</span><span style="font-size:9px;color:#334155">grows with patterns</span></div>
-        ${symsHTML}
-        <div class="mb-intel-hdr" style="margin-top:8px"><span>Live Stream</span><span style="font-size:9px;color:#334155">newest first</span></div>
+        ${tokenSection}
+        ${compressionSection}
+        ${healthHTML}
+        <div class="mb-intel-hdr" style="margin-bottom:5px;"><span>Live Stream</span><span style="font-size:9px;color:#334155">newest first</span></div>
         ${streamHTML}
+        <div class="mb-foot" style="margin-top:6px;"><span>Turn ${c.turns}</span><button class="mb-btn" id="mb-reset" style="font-size:10px;color:#475569;">↻ Reset</button></div>
       </div>`;
   }
+
 
   function renderTokensPanel() {
     const c = state.conversation;
@@ -387,21 +543,51 @@
       </div>`;
   }
 
-  function renderCapturesPanel() {
+  
+  function renderRawStream() {
+    if (intel.rawLines.length === 0) {
+      return `<div style="font-size:10px;color:#475569;font-style:italic;padding:8px;">Stream will appear here as you chat…</div>`;
+    }
+    // Highlight § symbols and [MEMBRAIN CONTEXT] blocks
+    function annotate(text) {
+      const symRx = /\u00a7[a-z0-9]+/g;
+      const ctxRx = /\[MEMBRAIN CONTEXT\]|\[END MEMBRAIN CONTEXT\]|<helix_context>|<\/helix_context>/g;
+      let html = esc(text);
+      // Highlight symbols
+      const symbols = intel.symbols.map(s => s.symbol).filter(Boolean);
+      for (const sym of symbols) {
+        const escaped = sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        html = html.replace(new RegExp(escaped, 'g'), `<span class="mb-sym-hit">${sym}</span>`);
+      }
+      // Highlight CI markers
+      html = html.replace(/\[MEMBRAIN CONTEXT\]/g, '<span class="mb-ctx-hit">[MEM▼]</span>');
+      html = html.replace(/\[END MEMBRAIN CONTEXT\]/g, '<span class="mb-ctx-hit">[MEM▲]</span>');
+      html = html.replace(/&lt;helix_context&gt;/g, '<span class="mb-ctx-hit">[CTX▼]</span>');
+      html = html.replace(/&lt;\/helix_context&gt;/g, '<span class="mb-ctx-hit">[CTX▲]</span>');
+      return html;
+    }
+    const lines = intel.rawLines.slice(-40); // last 40 lines
+    return `<div class="mb-raw-stream" id="mb-raw-stream">${
+      lines.map(l => `<div class="mb-raw-line ${l.role}">${annotate(l.text)}</div>`).join('')  
+    }</div>`;
+  }
+
+function renderCapturesPanel() {
     const db = liveData.stats?.db || {};
     const convos = liveData.conversations;
     const interceptors = liveData.interceptors;
     const interceptorCount = Object.keys(interceptors).length;
+    const hasInjections = intel.stream.filter(e => e.type === 'inject').length > 0;
     let pipeClass = 'err', pipeMsg = 'No interceptor active', pipeRight = 'Open an AI chat';
     if (interceptorCount > 0) {
       const recent = Object.values(interceptors).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0];
       pipeClass = 'ok';
       pipeMsg = interceptorCount === 1 ? 'Interceptor active' : `${interceptorCount} interceptors active`;
       pipeRight = timeAgo(recent?.timestamp);
-    } else if (state.capturing) {
-      pipeClass = 'warn';
-      pipeMsg = 'Capturing (no interceptor ping yet)';
-      pipeRight = '';
+    } else if (state.capturing || hasInjections) {
+      pipeClass = 'ok';
+      pipeMsg = 'Active (injections confirmed)';
+      pipeRight = hasInjections ? `${intel.stream.filter(e=>e.type==='inject').length} injections` : '';
     }
     const unsynced = db.unsynced || 0;
     const totalConvs = db.conversations || 0;
@@ -447,12 +633,19 @@
           ${pipeRight ? '<span class="mb-pipe-right">' + pipeRight + '</span>' : ''}
         </div>
         <div class="mb-cap-stats">
-          <div class="mb-cap-stat"><div class="mb-cap-stat-val">${totalConvs || 0}</div><div class="mb-cap-stat-lbl">Convos</div></div>
-          <div class="mb-cap-stat"><div class="mb-cap-stat-val">${totalTurns || 0}</div><div class="mb-cap-stat-lbl">Turns</div></div>
+          <div class="mb-cap-stat"><div class="mb-cap-stat-val" id="mb-conv-count">${totalConvs || 0}</div><div class="mb-cap-stat-lbl">Convos</div></div>
+          <div class="mb-cap-stat"><div class="mb-cap-stat-val" id="mb-turn-count">${totalTurns || 0}</div><div class="mb-cap-stat-lbl">Turns</div></div>
           <div class="mb-cap-stat"><div class="mb-cap-stat-val" style="${unsynced > 0 ? 'color:#facc15' : 'color:#34d399'}">${unsynced}</div><div class="mb-cap-stat-lbl">Unsynced</div></div>
         </div>
         <div class="mb-conv-hdr"><span>Recent Captures</span><span class="mb-conv-hdr-right">last 10</span></div>
         <div class="mb-conv-list" id="mb-conv-list">${convHTML}</div>
+        <div style="margin-top:10px;">
+          <div style="font-size:10px;font-weight:700;color:#475569;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:5px;display:flex;justify-content:space-between;align-items:center;">
+            <span>Live Stream</span>
+            <span style="font-size:9px;color:#334155;font-weight:400;">§ = symbol ▼ = CI injected</span>
+          </div>
+          ${renderRawStream()}
+        </div>
         <div class="mb-sync-row">
           <span id="mb-sync-status">${syncLine}</span>
           <button class="mb-sync-btn" id="mb-sync-btn">↻ Sync</button>
@@ -489,25 +682,24 @@
       <div class="mb-card ${isOn ? 'active' : ''}">
         <div class="mb-head">
           <div class="mb-brand"><div class="mb-logo">M</div><span class="mb-name">MEMBRAIN</span><div class="mb-dot ${isOn ? 'on' : 'off'}"></div></div>
-          <div class="mb-btns"><button class="mb-btn" id="mb-reset" title="Reset">↻</button><button class="mb-btn" id="mb-min" title="Minimize">−</button></div>
+          <div class="mb-btns"><button class="mb-btn" id="mb-settings" title="Settings &amp; Upgrade">⚙</button><button class="mb-btn" id="mb-reset" title="Reset">↻</button><button class="mb-btn" id="mb-min" title="Minimize">−</button></div>
         </div>
         <div class="mb-tabs">
-          <div class="mb-tab ${state.activeTab === 'tokens' ? 'active' : ''}" data-tab="tokens">Tokens${tokenBadge}</div>
+          <div class="mb-tab ${state.activeTab === 'intelligence' ? 'active' : ''}" data-tab="intelligence">⚡ Intel${tokenBadge}</div>
           <div class="mb-tab ${state.activeTab === 'captures' ? 'active' : ''}" data-tab="captures">Captures${captureBadge}</div>
-          <div class="mb-tab ${state.activeTab === 'intelligence' ? 'active' : ''}" data-tab="intelligence">⚡CI${intel.stream.length > 0 ? '<span class="mb-tab-badge green">' + intel.stream.length + '</span>' : ''}</div>
         </div>
-        ${state.activeTab === 'tokens' ? renderTokensPanel() : state.activeTab === 'captures' ? renderCapturesPanel() : renderIntelligencePanel()}
+        ${state.activeTab === 'captures' ? renderCapturesPanel() : renderIntelligencePanel()}
       </div>`;
     hud.querySelectorAll('.mb-tab').forEach(tab => {
       tab.addEventListener('click', () => {
         state.activeTab = tab.dataset.tab;
         if (state.activeTab === 'captures') fetchLiveData().then(() => render());
-        else if (state.activeTab === 'intelligence') render();
         else render();
         saveState();
       });
     });
     hud.querySelector('#mb-min')?.addEventListener('click', () => { state.minimized = true; render(); saveState(); });
+    hud.querySelector('#mb-settings')?.addEventListener('click', () => { chrome.runtime.sendMessage({ action: 'open-options' }); });
     hud.querySelector('#mb-reset')?.addEventListener('click', () => {
       state.conversation = { input: 0, output: 0, turns: 0 };
       state.compressionSaved = 0; state.conversationRawInput = 0;
@@ -543,8 +735,8 @@
       state.lastConversationId = conversationId;
       liveData.lastFetch = 0;
     }
-    if (input_tokens)  { state.conversation.input  += input_tokens;  state.session.input  += input_tokens; }
-    if (output_tokens) { state.conversation.output += output_tokens; state.session.output += output_tokens; }
+    if (typeof input_tokens === 'number')  { state.conversation.input  += input_tokens;  state.session.input  += input_tokens; }
+    if (typeof output_tokens === 'number') { state.conversation.output += output_tokens; state.session.output += output_tokens; }
     if (raw_input_tokens) { state.conversationRawInput += raw_input_tokens; state.sessionRawInput += raw_input_tokens; }
     else if (input_tokens) { state.conversationRawInput += input_tokens; state.sessionRawInput += input_tokens; }
     state.conversation.turns++; state.session.turns++;
@@ -568,6 +760,42 @@
       if (intel.stream.length > 50) intel.stream.shift();
       render(); saveState();
     }
+    if (t === `${PREFIX}:stream-complete` || t === `${PREFIX}:response-captured`) {
+      const p = event.data.payload || {};
+      const text = p.content || p.body || '';
+      if (text && text.length > 0) {
+        intel.rawLines.push({
+          role: 'assistant',
+          text: text.slice(0, 500),
+          ts: Date.now(),
+          hasSymbols: intel.symbols.some(s => text.includes(s.symbol)),
+        });
+        if (intel.rawLines.length > 60) intel.rawLines.shift();
+        if (state.activeTab === 'captures') render();
+      }
+    }
+    if (t === `${PREFIX}:request-captured`) {
+      const p = event.data.payload || {};
+      const text = p.body || p.content || '';
+      if (text && text.length > 2) {
+        // Extract user message text from JSON body
+        let userText = text;
+        try {
+          const parsed = JSON.parse(text);
+          const msgs = parsed.messages || [];
+          const last = [...msgs].reverse().find(m => m.role === 'user');
+          if (last) userText = typeof last.content === 'string' ? last.content : (last.content?.[0]?.text || text);
+        } catch {}
+        intel.rawLines.push({
+          role: 'user',
+          text: userText.slice(0, 300),
+          ts: Date.now(),
+          hasSymbols: intel.symbols.some(s => userText.includes(s.symbol)),
+        });
+        if (intel.rawLines.length > 60) intel.rawLines.shift();
+        if (state.activeTab === 'captures') render();
+      }
+    }
     if (t === `${PREFIX}:context-injected`) {
       const p = event.data.payload || {};
       intel.totalInjected += p.totalChars || 0;
@@ -580,6 +808,7 @@
         query: p.query || '',
         layers: p.layers || [],
         factsCount: p.factsCount || 0,
+        facts: p.facts || [],
         method: p.method || '',
         ts: Date.now(),
       });
@@ -600,6 +829,7 @@
         query: '',
         layers: ['local'],
         factsCount: p.factCount || 0,
+        facts: p.facts || [],
         method: 'mirror-index',
         ts: Date.now(),
       });
@@ -611,9 +841,15 @@
     if (t === `${PREFIX}:symbol-promoted`) {
       // Fired when phrase_promoter promotes a new § symbol
       const { symbol, phrase } = event.data.payload || {};
-      if (symbol && !intel.symbols.find(s => s.symbol === symbol)) {
-        intel.symbols.push({ symbol, phrase, ts: Date.now() });
-        if (intel.symbols.length > 40) intel.symbols.shift();
+      if (symbol) {
+        const existing = intel.symbols.find(s => s.symbol === symbol);
+        if (existing) {
+          existing.phrase = phrase || existing.phrase;
+          existing.freq = event.data.payload?.freq || existing.freq;
+        } else {
+          intel.symbols.push({ symbol, phrase, freq: event.data.payload?.freq || 0, ts: Date.now() });
+        }
+        if (intel.symbols.length > 60) intel.symbols.shift();
         if (state.activeTab === 'intelligence') render();
       }
     }
@@ -628,15 +864,51 @@
     }
   }, 8000);
 
+  // Refresh symbol dictionary periodically
+  setInterval(fetchDictionary, 5 * 60 * 1000);
+
+  // Fetch symbol dictionary from SW and populate intel.symbols
+  async function fetchDictionary() {
+    try {
+      const result = await sendToSW({ action: 'get-dictionary' });
+      const symbols = result?.symbols || [];
+      if (symbols.length > 0) {
+        // Merge into intel.symbols - SW is source of truth
+        intel.symbols = symbols.map(s => ({
+          symbol: s.symbol,
+          phrase: s.phrase,
+          freq: s.freq || 0,
+          value: s.value || 0,
+          source: s.source || 'learned',
+          ts: s.promoted || Date.now(),
+        }));
+        console.debug(`[MemBrain HUD] Loaded ${intel.symbols.length} symbols from SW`);
+        render();
+      }
+    } catch(e) {
+      console.warn('[MemBrain HUD] Dict fetch failed:', e);
+    }
+  }
+
   function init() {
     loadState().then(async () => {
       if (state.compressionEnabled) {
         window.postMessage({ source: PREFIX, type: `${PREFIX}:compression-toggle`, payload: { enabled: true } }, '*');
       }
       await fetchLiveData();
+      await fetchDictionary();
       render();
     });
   }
+
+  // Auto-scroll raw stream only if user hasn't scrolled up
+  function scrollRawStream() {
+    const el = document.getElementById('mb-raw-stream');
+    if (!el) return;
+    const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (isAtBottom) el.scrollTop = el.scrollHeight;
+  }
+  setInterval(scrollRawStream, 800);
 
   if (document.body) init();
   else document.addEventListener('DOMContentLoaded', init);

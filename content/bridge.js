@@ -319,6 +319,20 @@
     }
   });
 
+  // Handle dictionary request from compression.js
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    if (event.data?.source !== PREFIX) return;
+    if (event.data?.type === PREFIX + ':request-dictionary') {
+      chrome.runtime.sendMessage({ action: 'get-dictionary' }, (r) => {
+        if (r?.symbols?.length > 0) {
+          window.postMessage({ source: PREFIX, type: PREFIX + ':dictionary-update', payload: { symbols: r.symbols } }, '*');
+          console.debug('[MemBrain:bridge] Dictionary delivered to compression:', r.symbols.length, 'symbols');
+        }
+      });
+    }
+  });
+
   // Pre-warm injection cache on page load with empty query
   // This ensures __memoryExtInjection is populated before first message
   // Send storage mode to MAIN world on init

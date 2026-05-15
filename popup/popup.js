@@ -539,3 +539,8 @@ loadContextInjectConfig();
   // Poll every 5s after that.
   setInterval(poll, 5000);
 })();
+
+// ==================== SETTINGS / OPTIONS BUTTON ====================
+document.getElementById('settingsBtn')?.addEventListener('click', () => {
+  chrome.runtime.openOptionsPage();
+});

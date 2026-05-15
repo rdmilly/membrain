@@ -14,7 +14,7 @@
 
   const PREFIX = 'memory-ext';
   const HUD_ID = `${PREFIX}-hud`;
-  const AUTO_DISMISS_MS = 6000;
+  const AUTO_DISMISS_MS = 12000;
 
   // ==================== STYLES ====================
 
@@ -26,8 +26,8 @@
     style.textContent = `
       #${HUD_ID} {
         position: fixed;
-        top: 12px;
-        right: 12px;
+        bottom: 16px;
+        right: 320px;
         z-index: 2147483647;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         font-size: 12px;
