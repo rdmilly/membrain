@@ -345,4 +345,22 @@
   setInterval(refreshInjectionCache, 30000);
 
   console.debug('[MemBrain] Bridge v0.5.5 active on', window.location.hostname);
+
+  // Handle org ID request from backfill worker
+  // Extracts lastActiveOrg from Next.js inline script data
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message.action !== 'get-org-id') return false;
+    try {
+      let orgId = null;
+      for (const script of document.querySelectorAll('script')) {
+        const m = script.textContent.match(/"lastActiveOrg","value":"([a-f0-9-]{36})"/);
+        if (m) { orgId = m[1]; break; }
+      }
+      sendResponse({ orgId });
+    } catch (e) {
+      sendResponse({ orgId: null, error: e.message });
+    }
+    return false;
+  });
+
 })();
