@@ -26,6 +26,7 @@ import { MemoryInjector } from '../lib/memory-injector.js';
 import { buildDictionary, getDictionary } from '../lib/symbol-dictionary.js';
 import { ingestAllFacts, queryGraph, getGraphStats } from '../lib/knowledge-graph.js';
 import { ClaudeBackfill } from '../backfill/claude-backfill.js';
+globalThis.ClaudeBackfill = ClaudeBackfill;  // expose for DevTools console
 import {
   inputBus,
   outputBus,
