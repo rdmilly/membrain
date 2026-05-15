@@ -25,6 +25,7 @@ import { FactExtractor } from '../lib/fact-extractor.js';
 import { MemoryInjector } from '../lib/memory-injector.js';
 import { buildDictionary, getDictionary } from '../lib/symbol-dictionary.js';
 import { ingestAllFacts, queryGraph, getGraphStats } from '../lib/knowledge-graph.js';
+import { ClaudeBackfill } from '../backfill/claude-backfill.js';
 import {
   inputBus,
   outputBus,
@@ -430,6 +431,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     case 'get-stats':
       getFullStats().then(sendResponse);
+      return true;
+
+    case 'start-backfill':
+      if (!globalThis._backfill) {
+        globalThis._backfill = new ClaudeBackfill(CONFIG);
+      }
+      globalThis._backfill.run(progress => {
+        chrome.runtime.sendMessage({ action: 'backfill-progress', data: progress }).catch(() => {});
+      });
+      sendResponse({ status: 'started' });
+      return false;
+
+    case 'pause-backfill':
+      globalThis._backfill?.pause();
+      sendResponse({ status: 'paused' });
+      return false;
+
+    case 'reset-backfill':
+      globalThis._backfill?.reset();
+      globalThis._backfill = null;
+      sendResponse({ status: 'reset' });
+      return false;
+
+    case 'get-backfill-status':
+      (globalThis._backfill
+        ? globalThis._backfill.getStatus()
+        : chrome.storage.local.get('backfill_state').then(r => r.backfill_state || { status: 'idle' })
+      ).then(sendResponse);
       return true;
 
     case 'export-data':
